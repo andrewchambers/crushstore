@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/andrewchambers/crushstore/crush"
 	"github.com/cespare/xxhash/v2"
 	"github.com/google/shlex"
 	"golang.org/x/sync/errgroup"
@@ -38,7 +39,7 @@ const (
 
 var (
 	DataDir      string
-	ThisLocation Location
+	ThisLocation crush.Location
 )
 
 func objPathFromKey(k string) string {
@@ -1010,11 +1011,11 @@ func nodeInfoHandler(w http.ResponseWriter, req *http.Request) {
 type ClusterConfig struct {
 	ConfigBytes      []byte
 	ClusterSecret    string
-	PlacementRules   []CrushSelection
-	StorageHierarchy *StorageHierarchy
+	PlacementRules   []crush.CrushSelection
+	StorageHierarchy *crush.StorageHierarchy
 }
 
-func (cfg *ClusterConfig) Crush(k string) ([]Location, error) {
+func (cfg *ClusterConfig) Crush(k string) ([]crush.Location, error) {
 	return cfg.StorageHierarchy.Crush(k, cfg.PlacementRules)
 }
 
@@ -1058,12 +1059,12 @@ func ParseClusterConfig(configYamlBytes []byte) (*ClusterConfig, error) {
 
 	newConfig.ClusterSecret = rawConfig.ClusterSecret
 
-	newConfig.StorageHierarchy, err = NewStorageHierarchyFromSchema(rawConfig.StorageSchema)
+	newConfig.StorageHierarchy, err = crush.NewStorageHierarchyFromSchema(rawConfig.StorageSchema)
 	if err != nil {
 		return nil, fmt.Errorf("unable parse storage-schema %q: %w", rawConfig.StorageSchema, err)
 	}
 
-	parseNodeInfo := func(s string) (*StorageNodeInfo, error) {
+	parseNodeInfo := func(s string) (*crush.StorageNodeInfo, error) {
 		parts, err := shlex.Split(s)
 		if err != nil {
 			return nil, fmt.Errorf("unable to split storage node spec %q into components: %w", s, err)
@@ -1087,38 +1088,38 @@ func ParseClusterConfig(configYamlBytes []byte) (*ClusterConfig, error) {
 			return nil, fmt.Errorf("unknown node status %q, expected 'healthy' or 'defunct'", parts[1])
 		}
 
-		return &StorageNodeInfo{
+		return &crush.StorageNodeInfo{
 			Weight:   weight,
 			Defunct:  defunct,
-			Location: Location(parts[2:]),
+			Location: crush.Location(parts[2:]),
 		}, nil
 	}
 
 	// TODO rename CrushSelection to PlacementRule
-	parsePlacementRule := func(s string) (CrushSelection, error) {
+	parsePlacementRule := func(s string) (crush.CrushSelection, error) {
 		parts, err := shlex.Split(s)
 		if err != nil {
-			return CrushSelection{}, fmt.Errorf("unable to split placement rule %q into components: %w", s, err)
+			return crush.CrushSelection{}, fmt.Errorf("unable to split placement rule %q into components: %w", s, err)
 		}
 		if len(parts) < 1 {
-			return CrushSelection{}, fmt.Errorf("unexpected empty placement rule")
+			return crush.CrushSelection{}, fmt.Errorf("unexpected empty placement rule")
 		}
 		switch parts[0] {
 		case "select":
 			if len(parts) != 3 {
-				return CrushSelection{}, fmt.Errorf("select placement rules require 2 arguments")
+				return crush.CrushSelection{}, fmt.Errorf("select placement rules require 2 arguments")
 			}
 			typeName := parts[1]
 			count, err := strconv.Atoi(parts[2])
 			if err != nil {
-				return CrushSelection{}, fmt.Errorf("unable to parse select count %q: %w", parts[2], err)
+				return crush.CrushSelection{}, fmt.Errorf("unable to parse select count %q: %w", parts[2], err)
 			}
-			return CrushSelection{
+			return crush.CrushSelection{
 				Type:  typeName,
 				Count: count,
 			}, nil
 		default:
-			return CrushSelection{}, fmt.Errorf("unexpected placement operator %q", parts[0])
+			return crush.CrushSelection{}, fmt.Errorf("unexpected placement operator %q", parts[0])
 		}
 	}
 
@@ -1203,7 +1204,7 @@ func WatchClusterConfigForever(configPath string) {
 
 var _storeLockF *os.File
 
-func OpenDataDir(location Location, dataDir string) error {
+func OpenDataDir(location crush.Location, dataDir string) error {
 	_, err := os.Stat(dataDir)
 	if err != nil {
 		return err
@@ -1296,7 +1297,7 @@ func main() {
 		log.Fatalf("-location must have at least one component")
 	}
 
-	ThisLocation = Location(parsedLocation)
+	ThisLocation = crush.Location(parsedLocation)
 
 	if *dataDir == "" {
 		log.Fatalf("-data-dir not specified.")
