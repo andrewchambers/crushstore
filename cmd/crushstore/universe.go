@@ -99,3 +99,16 @@ func (u *realUniverse) CheckObj(server string, k string) (ObjMeta, bool, error) 
 	err = json.Unmarshal(body, &stat)
 	return stat, true, err
 }
+
+type MockUniverse struct {
+	ReplicateFunc func(string, string, *os.File) error
+	CheckFunc     func(string, string) (ObjMeta, bool, error)
+}
+
+func (u *MockUniverse) ReplicateObj(server string, k string, f *os.File) error {
+	return u.ReplicateFunc(server, k, f)
+}
+
+func (u *MockUniverse) CheckObj(server string, k string) (ObjMeta, bool, error) {
+	return u.CheckFunc(server, k)
+}

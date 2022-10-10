@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const OBJ_HEADER_SIZE = 40
+
 type ObjMeta struct {
 	Size               uint64
 	Tombstone          bool

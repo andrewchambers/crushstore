@@ -151,13 +151,25 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 	}
 	defer f.Close()
 
+	stampBytes := [8]byte{}
+	_, err = f.ReadAt(stampBytes[:], 32)
+	if err != nil {
+		internalError(w, "io error reading %q: %s", objPath, err)
+		return
+	}
+	stamp := ObjStampFromBytes(stampBytes[:])
+	if stamp.Tombstone {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
 	stat, err := f.Stat()
 	if err != nil {
 		internalError(w, "io error statting %q: %s", objPath, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()-40))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()-OBJ_HEADER_SIZE))
 	http.ServeContent(w, req, k, stat.ModTime(), &objectContentReadSeeker{f})
 }
 
@@ -197,6 +209,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 	err = req.ParseMultipartForm(16 * 1024 * 1024)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("malformed upload"))
 		return
 	}
 
@@ -230,7 +243,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 	hasher := blake3.New(32, nil)
 
 	if isReplication {
-		header := [40]byte{}
+		header := [OBJ_HEADER_SIZE]byte{}
 		_, err := io.ReadFull(dataFile, header[:])
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -242,8 +255,8 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		copy(hash[:], header[:32])
-		stamp.FieldsFromBytes(header[32:40])
-		_, err = hasher.Write(header[32:40])
+		stamp.FieldsFromBytes(header[32:])
+		_, err = hasher.Write(header[32:])
 		if err != nil {
 			internalError(w, "error hashing: %s", err)
 			return
@@ -258,7 +271,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	} else {
-		header := [40]byte{}
+		header := [OBJ_HEADER_SIZE]byte{}
 		stamp.Tombstone = false
 		stamp.CreatedAtUnixMicro = uint64(time.Now().UnixMicro())
 		stampBytes := stamp.ToBytes()
@@ -373,7 +386,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		loc := locs[i]
 		wg.Add(1)
 		go func() {
-			wg.Done()
+			defer wg.Done()
 			server := loc[len(loc)-1]
 			if isReplication {
 				meta, ok, err := CheckObj(server, k)
@@ -458,9 +471,9 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 	}
 	objStampBytes := objStamp.ToBytes()
 	objHash := blake3.Sum256(objStampBytes[:])
-	obj := [40]byte{}
-	copy(obj[0:32], objHash[:])
-	copy(obj[32:40], objStampBytes[:])
+	obj := [OBJ_HEADER_SIZE]byte{}
+	copy(obj[:32], objHash[:])
+	copy(obj[32:], objStampBytes[:])
 
 	// Write object.
 	tmpF, err := os.CreateTemp(DataDir, "obj*$tmp") // Use a suffix that our key escape handles.
@@ -546,6 +559,7 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 
 }
 
+/*
 func nodeInfoHandler(w http.ResponseWriter, req *http.Request) {
 
 	counters := struct {
@@ -586,3 +600,4 @@ func nodeInfoHandler(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(buf)
 }
+*/

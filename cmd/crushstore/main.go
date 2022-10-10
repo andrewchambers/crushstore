@@ -76,7 +76,6 @@ func OpenDataDir(location crush.Location, dataDir string) error {
 		return err
 	}
 
-	// TODO load lastscrub.json
 	for i := 0; i < DATA_DIRSHARDS; i++ {
 		p := filepath.Join(dataDir, fmt.Sprintf("obj/%03x", i))
 		_, err := os.Stat(p)
@@ -130,7 +129,7 @@ func main() {
 		log.Fatalf("error preparing -data-dir: %s", err)
 	}
 
-	err = ReloadClusterConfigFromFile(*clusterConfigFile)
+	err = LoadClusterConfigFromFile(*clusterConfigFile)
 	if err != nil {
 		log.Fatalf("error loading initial config: %s", err)
 	}
@@ -140,7 +139,7 @@ func main() {
 	http.HandleFunc("/get", getHandler)
 	http.HandleFunc("/check", checkHandler)
 	http.HandleFunc("/delete", deleteHandler)
-	http.HandleFunc("/node_info", nodeInfoHandler)
+	// http.HandleFunc("/node_info", nodeInfoHandler)
 
 	log.Printf("serving location %v", ThisLocation)
 	log.Printf("serving on %s", *listenAddress)
