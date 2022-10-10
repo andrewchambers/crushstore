@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
+	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 
 	"github.com/andrewchambers/crushstore/clusterconfig"
+	"golang.org/x/sync/errgroup"
 )
 
 type Client struct {
@@ -73,22 +78,128 @@ func (c *Client) GetClusterConfig() *clusterconfig.ClusterConfig {
 type PutOptions struct {
 }
 
-func (c *Client) Put(key string, data io.Reader, opts PutOptions) error {
-	return errors.New("TODO")
+func (c *Client) Put(k string, data io.ReadSeeker, opts PutOptions) error {
+
+	locs, err := c.GetClusterConfig().Crush(k)
+	if err != nil {
+		return err
+	}
+
+	errs := []error{}
+
+	for i, loc := range locs {
+
+		if i != 0 {
+			_, err := data.Seek(0, io.SeekStart)
+			if err != nil {
+				return err
+			}
+		}
+
+		server := loc[len(loc)-1]
+
+		r, w := io.Pipe()
+		mpw := multipart.NewWriter(w)
+		errg, _ := errgroup.WithContext(context.Background())
+		errg.Go(func() error {
+			var part io.Writer
+			defer w.Close()
+			part, err := mpw.CreateFormFile("data", "data")
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(part, data)
+			if err != nil {
+				return err
+			}
+			err = mpw.Close()
+			if err != nil {
+				return err
+			}
+			return nil
+		})
+		defer func() {
+			_ = r.Close()
+			_ = errg.Wait()
+		}()
+
+		endpoint := fmt.Sprintf("%s/put?key=%s", server, url.QueryEscape(k))
+		resp, err := http.Post(endpoint, mpw.FormDataContentType(), r)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("unable to read response from %s: %s", endpoint, err))
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			errs = append(errs, fmt.Errorf("upload failed: %s, body: %q", resp.Status, body))
+			continue
+		}
+
+		uploadErr := errg.Wait()
+		if err != nil {
+			errs = append(errs, uploadErr)
+		}
+
+		return nil
+	}
+
+	// XXX some sort of multi error?
+	return errs[0]
+
 }
 
 type GetOptions struct {
 }
 
-func (c *Client) Get(key string, info io.Writer, opts GetOptions) error {
+func (c *Client) Get(k string, info io.Writer, opts GetOptions) error {
 	return errors.New("TODO")
 }
 
 type DeleteOptions struct {
 }
 
-func (c *Client) Delete(key string, opts DeleteOptions) error {
-	return errors.New("TODO")
+func (c *Client) Delete(k string, opts DeleteOptions) error {
+
+	locs, err := c.GetClusterConfig().Crush(k)
+	if err != nil {
+		return err
+	}
+
+	errs := []error{}
+
+	for _, loc := range locs {
+		server := loc[len(loc)-1]
+		endpoint := fmt.Sprintf("%s/delete", server)
+		resp, err := http.PostForm("https://httpbin.org/post", url.Values{
+			"key": {k},
+		})
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("unable to read response from %s: %s", endpoint, err))
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			errs = append(errs, fmt.Errorf("delete failed: %s, body: %q", resp.Status, body))
+			continue
+		}
+
+		return nil
+	}
+
+	// XXX some sort of multi error?
+	return errs[0]
 }
 
 /*

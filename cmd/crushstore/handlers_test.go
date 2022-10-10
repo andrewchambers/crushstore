@@ -86,7 +86,7 @@ func TestPrimaryPutAndGet(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheUniverse.(*MockUniverse).ReplicateFunc = func(server string, k string, f *os.File) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -124,7 +124,7 @@ func TestPrimaryDelete(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheUniverse.(*MockUniverse).ReplicateFunc = func(server string, k string, f *os.File) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -179,7 +179,7 @@ func TestSecondaryPut(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheUniverse.(*MockUniverse).ReplicateFunc = func(server string, k string, f *os.File) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -226,7 +226,7 @@ func TestRejectsCorrupt(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheUniverse.(*MockUniverse).ReplicateFunc = func(server string, k string, f *os.File) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
