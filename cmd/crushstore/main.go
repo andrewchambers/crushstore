@@ -12,7 +12,6 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -47,75 +46,10 @@ func objPathFromKey(k string) string {
 	return fmt.Sprintf("%s/obj/%03x/%s", DataDir, h, url.QueryEscape(k))
 }
 
-func replicateObj(server string, k string, f *os.File) error {
-	r, w := io.Pipe()
-	mpw := multipart.NewWriter(w)
-	errg, _ := errgroup.WithContext(context.Background())
-	errg.Go(func() error {
-		var part io.Writer
-		defer w.Close()
-		defer f.Close()
-		part, err := mpw.CreateFormFile("data", "data")
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(part, f)
-		if err != nil {
-			return err
-		}
-		err = mpw.Close()
-		if err != nil {
-			return err
-		}
-		return nil
-	})
-
-	endpoint := fmt.Sprintf("%s/put?key=%s&type=replicate", server, k)
-	resp, err := http.Post(endpoint, mpw.FormDataContentType(), r)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("unable to read response from %s: %s", endpoint, err)
-	}
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("post object %q to %s failed: %s, body=%q", k, endpoint, resp.Status, body)
-	}
-
-	uploadErr := errg.Wait()
-	if err != nil {
-		return uploadErr
-	}
-
-	return nil
-}
-
-func checkObj(server string, k string) (ObjMeta, bool, error) {
-	endpoint := fmt.Sprintf("%s/check?key=%s", server, k)
-	resp, err := http.Get(endpoint)
-	if err != nil {
-		return ObjMeta{}, false, fmt.Errorf("unable to check %q@%s", k, server)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return ObjMeta{}, false, fmt.Errorf("unable to read check body for %q@%s", k, server)
-	}
-
-	if resp.StatusCode == 404 {
-		return ObjMeta{}, false, nil
-	}
-
-	if resp.StatusCode != 200 {
-		return ObjMeta{}, false, fmt.Errorf("unable to check %q@%s: %s", k, server, err)
-	}
-
-	stat := ObjMeta{}
-	err = json.Unmarshal(body, &stat)
-	return stat, true, err
+type ObjMeta struct {
+	Size               uint64
+	Tombstone          bool
+	CreatedAtUnixMicro uint64
 }
 
 type ObjStamp struct {
@@ -147,12 +81,6 @@ func (s *ObjStamp) ToBytes() [8]byte {
 	b := [8]byte{}
 	binary.BigEndian.PutUint64(b[:], stamp)
 	return b
-}
-
-type ObjMeta struct {
-	Size               uint64
-	Tombstone          bool
-	CreatedAtUnixMicro uint64
 }
 
 func internalError(w http.ResponseWriter, format string, a ...interface{}) {
@@ -505,7 +433,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 			wg.Done()
 			server := loc[len(loc)-1]
 			if isReplication {
-				meta, ok, err := checkObj(server, k)
+				meta, ok, err := CheckObj(server, k)
 				if err != nil {
 					log.Printf("error checking %q@%s: %s", k, server, err)
 					return
@@ -525,7 +453,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 			}
 			defer objF.Close()
 			log.Printf("replicating %q to %s", k, server)
-			err = replicateObj(server, k, objF)
+			err = ReplicateObj(server, k, objF)
 			if err != nil {
 				log.Printf("error replicating %q: %s", objPath, err)
 				return
@@ -649,7 +577,7 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 			}
 			defer objF.Close()
 			log.Printf("replicating deletion of %q to %s", k, server)
-			err = replicateObj(server, k, objF)
+			err = ReplicateObj(server, k, objF)
 			if err != nil {
 				log.Printf("error replicating %q: %s", objPath, err)
 				return
@@ -763,7 +691,7 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 	if ThisLocation.Equals(primaryLoc) {
 		for i := 1; i < len(locs); i++ {
 			server := locs[i][len(locs[i])-1]
-			meta, ok, err := checkObj(server, k)
+			meta, ok, err := CheckObj(server, k)
 			if err != nil {
 				logScrubError(SCRUB_EREPL, "scrubber check failed: %s", err)
 				continue
@@ -772,14 +700,14 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 				if stamp.Tombstone && !meta.Tombstone {
 					// Both have the data, but they disagree about the deletion state.
 					log.Printf("scrubber replicating tombstone of %q to %s", k, server)
-					err := replicateObj(server, k, objF)
+					err := ReplicateObj(server, k, objF)
 					if err != nil {
 						logScrubError(SCRUB_EREPL, "scrubber replication of %q failed: %s", k, err)
 					}
 				}
 			} else {
 				log.Printf("scrubber replicating %q to %s", k, server)
-				err := replicateObj(server, k, objF)
+				err := ReplicateObj(server, k, objF)
 				if err != nil {
 					logScrubError(SCRUB_EREPL, "scrubber replication of %q failed: %s", k, err)
 				}
@@ -787,7 +715,7 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 		}
 	} else {
 		primaryServer := primaryLoc[len(primaryLoc)-1]
-		meta, ok, err := checkObj(primaryServer, k)
+		meta, ok, err := CheckObj(primaryServer, k)
 		if err != nil {
 			logScrubError(SCRUB_EREPL, "scrubber was unable to verify primary placement of %q: %s", k, err)
 			return
@@ -798,7 +726,7 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 			} else {
 				log.Printf("scrubber replicating tombstone of %q to %s", k, primaryServer)
 			}
-			err := replicateObj(primaryServer, k, objF)
+			err := ReplicateObj(primaryServer, k, objF)
 			if err != nil {
 				logScrubError(SCRUB_EREPL, "scrubber replication of %q failed: %s", k, err)
 				return
