@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,14 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
 	"lukechampine.com/blake3"
 )
-
-func objPathFromKey(k string) string {
-	h := xxhash.Sum64String(k) % DATA_DIRSHARDS
-	return fmt.Sprintf("%s/obj/%03x/%s", DataDir, h, url.QueryEscape(k))
-}
 
 func internalError(w http.ResponseWriter, format string, a ...interface{}) {
 	log.Printf(format, a...)
@@ -43,7 +38,7 @@ func checkHandler(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	objPath := objPathFromKey(k)
+	objPath := ObjectPathFromKey(k)
 	f, err := os.Open(objPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -127,7 +122,7 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	objPath := objPathFromKey(k)
+	objPath := ObjectPathFromKey(k)
 	f, err := os.Open(objPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -159,7 +154,7 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 	}
 	stamp := ObjStampFromBytes(stampBytes[:])
 	if stamp.Tombstone {
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusGone)
 		return
 	}
 
@@ -169,7 +164,7 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()-OBJ_HEADER_SIZE))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()-OBJECT_HEADER_SIZE))
 	http.ServeContent(w, req, k, stat.ModTime(), &objectContentReadSeeker{f})
 }
 
@@ -186,7 +181,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	objPath := objPathFromKey(k)
+	objPath := ObjectPathFromKey(k)
 	objDir := filepath.Dir(objPath)
 
 	locs, err := GetClusterConfig().Crush(k)
@@ -206,10 +201,10 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	err = req.ParseMultipartForm(16 * 1024 * 1024)
+	err = req.ParseMultipartForm(1024 * 1024)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("malformed upload"))
+		w.Write([]byte(err.Error()))
 		return
 	}
 
@@ -221,8 +216,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 	}
 	defer dataFile.Close()
 
-	// Write object.
-	tmpF, err := os.CreateTemp(DataDir, "obj.*.tmp")
+	tmpF, err := os.CreateTemp(objDir, "obj*$tmp")
 	if err != nil {
 		internalError(w, "io error creating temporary file: %s", err)
 		return
@@ -243,16 +237,17 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 	hasher := blake3.New(32, nil)
 
 	if isReplication {
-		header := [OBJ_HEADER_SIZE]byte{}
+		header := [OBJECT_HEADER_SIZE]byte{}
 		_, err := io.ReadFull(dataFile, header[:])
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				w.WriteHeader(400)
+				w.Write([]byte("unexpected EOF"))
+				return
 			} else {
-				log.Printf("unable to read put object: %s", err)
-				w.WriteHeader(500)
+				internalError(w, "unable to read put object: %s", err)
+				return
 			}
-			return
 		}
 		copy(hash[:], header[:32])
 		stamp.FieldsFromBytes(header[32:])
@@ -271,7 +266,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	} else {
-		header := [OBJ_HEADER_SIZE]byte{}
+		header := [OBJECT_HEADER_SIZE]byte{}
 		stamp.Tombstone = false
 		stamp.CreatedAtUnixMicro = uint64(time.Now().UnixMicro())
 		stampBytes := stamp.ToBytes()
@@ -324,8 +319,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 			internalError(w, "io error opening %q: %s", objPath, err)
 			return
 		}
-	}
-	if existingF != nil {
+	} else if err == nil {
 		existingHeader := [40]byte{}
 		_, err := existingF.ReadAt(existingHeader[:], 0)
 		if err != nil {
@@ -336,14 +330,14 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		existingStamp := ObjStampFromBytes(existingHeader[32:])
 		if existingStamp.Tombstone && stamp.Tombstone {
 			// Nothing to do, already deleted.
-			w.WriteHeader(200)
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
 		// Only accept the put if it is a delete or reupload of the existing object.
 		if !stamp.Tombstone {
 			if !bytes.Equal(hash[:], existingHeader[:32]) {
-				w.WriteHeader(400)
+				w.WriteHeader(http.StatusConflict)
 				w.Write([]byte("conflicting put"))
 				return
 			}
@@ -441,14 +435,13 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	q := req.URL.Query()
-	k := url.QueryEscape(q.Get("key"))
+	k := url.QueryEscape(req.FormValue("key"))
 	if k == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	objPath := objPathFromKey(k)
+	objPath := ObjectPathFromKey(k)
 	objDir := filepath.Dir(objPath)
 
 	locs, err := GetClusterConfig().Crush(k)
@@ -471,12 +464,11 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 	}
 	objStampBytes := objStamp.ToBytes()
 	objHash := blake3.Sum256(objStampBytes[:])
-	obj := [OBJ_HEADER_SIZE]byte{}
+	obj := [OBJECT_HEADER_SIZE]byte{}
 	copy(obj[:32], objHash[:])
 	copy(obj[32:], objStampBytes[:])
 
-	// Write object.
-	tmpF, err := os.CreateTemp(DataDir, "obj*$tmp") // Use a suffix that our key escape handles.
+	tmpF, err := os.CreateTemp(objDir, "obj*$tmp")
 	if err != nil {
 		internalError(w, "io error creating temporary file: %s", err)
 		return
@@ -559,45 +551,136 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 
 }
 
-/*
-func nodeInfoHandler(w http.ResponseWriter, req *http.Request) {
+type expiringIter struct {
+	lock         sync.Mutex
+	it           interface{}
+	cleanupTimer *time.Timer
+}
 
-	counters := struct {
-		LastScrubCorruptionErrorCount  uint64
-		LastScrubOtherErrorCount       uint64
-		LastScrubReplicationErrorCount uint64
-		LastScrubbedBytes              uint64
-		LastScrubbedObjects            uint64
+const _ITERATOR_EXPIRY = 30 * time.Second
 
-		TotalScrubCorruptionErrorCount  uint64
-		TotalScrubOtherErrorCount       uint64
-		TotalScrubReplicationErrorCount uint64
-		TotalScrubbedBytes              uint64
-		TotalScrubbedObjects            uint64
-		ScrubInProgress                 uint64
-		ScrubsCompleted                 uint64
-	}{
-		LastScrubCorruptionErrorCount:   atomic.LoadUint64(&_lastScrubCorruptionErrorCount),
-		LastScrubOtherErrorCount:        atomic.LoadUint64(&_lastScrubOtherErrorCount),
-		LastScrubReplicationErrorCount:  atomic.LoadUint64(&_lastScrubReplicationErrorCount),
-		LastScrubbedBytes:               atomic.LoadUint64(&_lastScrubbedBytes),
-		LastScrubbedObjects:             atomic.LoadUint64(&_lastScrubbedObjects),
-		TotalScrubCorruptionErrorCount:  atomic.LoadUint64(&_totalScrubCorruptionErrorCount),
-		TotalScrubOtherErrorCount:       atomic.LoadUint64(&_totalScrubOtherErrorCount),
-		TotalScrubReplicationErrorCount: atomic.LoadUint64(&_totalScrubReplicationErrorCount),
-		TotalScrubbedBytes:              atomic.LoadUint64(&_totalScrubbedBytes),
-		TotalScrubbedObjects:            atomic.LoadUint64(&_totalScrubbedObjects),
-		ScrubInProgress:                 uint64(atomic.LoadUint64(&_scrubInProgress)),
-		ScrubsCompleted:                 atomic.LoadUint64(&_scrubsCompleted),
-	}
+var _activeIterators sync.Map
 
-	buf, err := json.Marshal(&counters)
-	if err != nil {
-		internalError(w, "unable to marshal counters: %s", err)
+func iterBeginHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
+	idBytes := [16]byte{}
+	_, err := cryptorand.Read(idBytes[:])
+	if err != nil {
+		internalError(w, "error creating object id: %s", err)
+		return
+	}
+	id := hex.EncodeToString(idBytes[:])
+
+	var it interface{}
+
+	switch req.FormValue("type") {
+	case "", "objects":
+		objIt, err := IterateObjects()
+		if err != nil {
+			internalError(w, "error creating object iterator: %s", err)
+			return
+		}
+		it = objIt
+	case "keys":
+		keyIt, err := IterateKeys()
+		if err != nil {
+			internalError(w, "error creating object iterator: %s", err)
+			return
+		}
+		it = keyIt
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("unknown iterator type"))
+		return
+	}
+
+	cleanup := time.AfterFunc(_ITERATOR_EXPIRY, func() {
+		it, ok := _activeIterators.LoadAndDelete(id)
+		if ok {
+			_ = it.(*expiringIter).it.(io.Closer).Close()
+		}
+	})
+
+	_activeIterators.Store(id, &expiringIter{
+		it:           it,
+		cleanupTimer: cleanup,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, "\"%s\"", id)
+}
+
+func iterNextHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	itId := req.FormValue("it")
+	_it, ok := _activeIterators.Load(itId)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("iterator expired or does not exist"))
+		return
+	}
+	it := _it.(*expiringIter)
+	it.lock.Lock()
+	defer it.lock.Unlock()
+	it.cleanupTimer.Reset(_ITERATOR_EXPIRY)
+
+	const BATCH_SIZE = 8192
+	var nItems int
+	var items interface{}
+
+	switch it := it.it.(type) {
+	case *ObjectIter:
+		_items := make([]ObjectIterEntry, 0, BATCH_SIZE)
+		for i := 0; i < BATCH_SIZE; i++ {
+			ent, ok, err := it.Next()
+			if err != nil {
+				internalError(w, "error during iteration: %s", err)
+				return
+			}
+			if !ok {
+				break
+			}
+			_items = append(_items, ent)
+		}
+		nItems = len(_items)
+		items = _items
+	case *KeyIter:
+		_items := make([]string, 0, BATCH_SIZE)
+		for i := 0; i < BATCH_SIZE; i++ {
+			key, ok, err := it.Next()
+			if err != nil {
+				internalError(w, "error during iteration: %s", err)
+				return
+			}
+			if !ok {
+				break
+			}
+			_items = append(_items, key)
+		}
+		nItems = len(_items)
+		items = _items
+	default:
+		panic(it)
+	}
+
+	if nItems == 0 {
+		_activeIterators.Delete(itId)
+		it.cleanupTimer.Stop()
+		_ = it.it.(io.Closer).Close()
+	}
+
+	buf, err := json.Marshal(items)
+	if err != nil {
+		internalError(w, "error marshalling response: %s", err)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(buf)
 }
-*/

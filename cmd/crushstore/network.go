@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var TheNetwork Network
+var TheNetwork Network = &realNetwork{}
 
 func ReplicateObj(server string, k string, f *os.File) error {
 	return TheNetwork.ReplicateObj(server, k, f)

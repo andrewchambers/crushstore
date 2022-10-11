@@ -256,7 +256,7 @@ func Scrub(opts ScrubOpts) {
 	}
 
 	objectCount := uint64(0)
-	err := filepath.WalkDir(filepath.Join(DataDir, "obj"), func(path string, e fs.DirEntry, err error) error {
+	err := filepath.WalkDir(filepath.Join(ObjectDir, "obj"), func(path string, e fs.DirEntry, err error) error {
 		if e.IsDir() {
 			return nil
 		}
@@ -382,7 +382,7 @@ func SaveScrubRecord(record ScrubRecord) {
 		log.Printf("WARNING: unable to marshal scrub record")
 		return
 	}
-	scrubRecordPath := filepath.Join(DataDir, "scrub-record")
+	scrubRecordPath := filepath.Join(ObjectDir, "scrub-record")
 	tmpScrubRecordPath := scrubRecordPath + "$tmp"
 	err = os.WriteFile(tmpScrubRecordPath, recordBytes, 0o644)
 	if err != nil {
@@ -397,7 +397,7 @@ func SaveScrubRecord(record ScrubRecord) {
 
 func LoadLastScrubRecord() {
 	record := ScrubRecord{}
-	recordJson, err := os.ReadFile(filepath.Join(DataDir, "scrub-record"))
+	recordJson, err := os.ReadFile(filepath.Join(ObjectDir, "scrub-record"))
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			log.Printf("WARNING: unable to load last scrub record: %s", err)
