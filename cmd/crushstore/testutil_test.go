@@ -24,7 +24,7 @@ storage-nodes:
 
 func PrepareForTest(t *testing.T) {
 	ThisLocation = crush.Location{"http://127.0.0.1:5000"}
-	err := OpenDataDir(ThisLocation, t.TempDir())
+	err := OpenObjectDir(ThisLocation, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func PrepareForTest(t *testing.T) {
 	SetClusterConfig(cfg)
 }
 
-func RandomKeyForThisLocation(t *testing.T) string {
+func RandomKeyPrimary(t *testing.T) string {
 	cfg := GetClusterConfig()
 	for {
 		k := fmt.Sprintf("key%d", mathrand.Int())
@@ -55,15 +55,29 @@ func RandomKeyForThisLocation(t *testing.T) string {
 	}
 }
 
-func RandomKeyForOtherLocation(t *testing.T) string {
+func RandomKeySecondary(t *testing.T) string {
 	cfg := GetClusterConfig()
 	for {
 		k := fmt.Sprintf("key%d", mathrand.Int())
-		loc, err := cfg.Crush(k)
+		locs, err := cfg.Crush(k)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !loc[0].Equals(ThisLocation) {
+		if !locs[0].Equals(ThisLocation) && locs[1].Equals(ThisLocation) {
+			return k
+		}
+	}
+}
+
+func RandomKeyOther(t *testing.T) string {
+	cfg := GetClusterConfig()
+	for {
+		k := fmt.Sprintf("key%d", mathrand.Int())
+		locs, err := cfg.Crush(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !locs[0].Equals(ThisLocation) && !locs[1].Equals(ThisLocation) {
 			return k
 		}
 	}

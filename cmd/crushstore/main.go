@@ -55,10 +55,11 @@ func main() {
 
 	http.HandleFunc("/put", putHandler)
 	http.HandleFunc("/get", getHandler)
-	http.HandleFunc("/check", checkHandler)
 	http.HandleFunc("/delete", deleteHandler)
 	http.HandleFunc("/iter_begin", iterBeginHandler)
 	http.HandleFunc("/iter_next", iterNextHandler)
+	http.HandleFunc("/replicate", replicateHandler)
+	http.HandleFunc("/check", checkHandler)
 
 	log.Printf("serving location %v", ThisLocation)
 	log.Printf("serving on %s", *listenAddress)

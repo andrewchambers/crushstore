@@ -15,8 +15,8 @@ import (
 	"lukechampine.com/blake3"
 )
 
-func mockPutRequest(t *testing.T, query, body string) *http.Request {
-	req, err := http.NewRequest("POST", "/put?"+query, nil)
+func mockFilePostRequest(t *testing.T, path string, body []byte) *http.Request {
+	req, err := http.NewRequest("POST", path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func mockPutRequest(t *testing.T, query, body string) *http.Request {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = fw.Write([]byte(body))
+	_, err = fw.Write(body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +56,14 @@ func mockPutRequest(t *testing.T, query, body string) *http.Request {
 	}
 	req.Body = bodyF
 	return req
+}
+
+func mockReplicateRequest(t *testing.T, query string, body []byte) *http.Request {
+	return mockFilePostRequest(t, "/replicate?"+query, body)
+}
+
+func mockPutRequest(t *testing.T, query string, body []byte) *http.Request {
+	return mockFilePostRequest(t, "/put?"+query, body)
 }
 
 func mockGetRequest(t *testing.T, query string) *http.Request {
@@ -91,7 +99,7 @@ func TestPrimaryPutAndGet(t *testing.T) {
 		return nil
 	}
 
-	k := RandomKeyForThisLocation(t)
+	k := RandomKeyPrimary(t)
 
 	req := mockGetRequest(t, "key="+k)
 	rr := httptest.NewRecorder()
@@ -100,7 +108,7 @@ func TestPrimaryPutAndGet(t *testing.T) {
 		t.Fatalf("get request failed: %d", rr.Code)
 	}
 
-	req = mockPutRequest(t, "key="+k, "hello")
+	req = mockPutRequest(t, "key="+k, []byte("hello"))
 	rr = httptest.NewRecorder()
 	putHandler(rr, req)
 	if rr.Code != http.StatusOK {
@@ -118,6 +126,41 @@ func TestPrimaryPutAndGet(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("get request failed: %d", rr.Code)
 	}
+
+    // Putting the same object twice should replicate again.
+    req = mockPutRequest(t, "key="+k, []byte("hello"))
+    rr = httptest.NewRecorder()
+    putHandler(rr, req)
+    if rr.Code != http.StatusOK {
+        body, _ := io.ReadAll(rr.Body)
+        t.Logf("body=%s", string(body))
+        t.Fatalf("request failed: %d", rr.Code)
+    }
+    if nReplicationCalls != 2 {
+        t.Fatal("unexpected number of replications")
+    }
+}
+
+func TestSecondaryPut(t *testing.T) {
+	PrepareForTest(t)
+
+	nReplicationCalls := uint64(0)
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
+		atomic.AddUint64(&nReplicationCalls, 1)
+		return nil
+	}
+
+	k := RandomKeySecondary(t)
+
+	req := mockPutRequest(t, "key="+k, []byte("hello"))
+	rr := httptest.NewRecorder()
+	putHandler(rr, req)
+	if rr.Code != http.StatusMovedPermanently {
+		body, _ := io.ReadAll(rr.Body)
+		t.Logf("body=%s", string(body))
+		t.Fatalf("request failed: %d", rr.Code)
+	}
+
 }
 
 func TestPrimaryDelete(t *testing.T) {
@@ -129,7 +172,7 @@ func TestPrimaryDelete(t *testing.T) {
 		return nil
 	}
 
-	k := RandomKeyForThisLocation(t)
+	k := RandomKeyPrimary(t)
 
 	req := mockCheckRequest(t, "key="+k)
 	rr := httptest.NewRecorder()
@@ -153,8 +196,8 @@ func TestPrimaryDelete(t *testing.T) {
 	req = mockGetRequest(t, "key="+k)
 	rr = httptest.NewRecorder()
 	getHandler(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("get request failed: %d", rr.Code)
+	if rr.Code != http.StatusGone {
+		t.Fatalf("get request not as expected: %d", rr.Code)
 	}
 
 	req = mockCheckRequest(t, "key="+k)
@@ -175,7 +218,7 @@ func TestPrimaryDelete(t *testing.T) {
 	}
 }
 
-func TestSecondaryPut(t *testing.T) {
+func TestSecondaryDelete(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
@@ -184,7 +227,135 @@ func TestSecondaryPut(t *testing.T) {
 		return nil
 	}
 
-	k := RandomKeyForOtherLocation(t)
+	k := RandomKeySecondary(t)
+	req := mockDeleteRequest(t, "key="+k)
+	rr := httptest.NewRecorder()
+	deleteHandler(rr, req)
+	if rr.Code != http.StatusMovedPermanently {
+		body, _ := io.ReadAll(rr.Body)
+		t.Logf("body=%s", string(body))
+		t.Fatalf("request failed: %d", rr.Code)
+	}
+
+}
+
+func TestPrimaryReplicate(t *testing.T) {
+	PrepareForTest(t)
+
+	nReplicationCalls := uint64(0)
+	nCheckCalls := uint64(0)
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
+		atomic.AddUint64(&nReplicationCalls, 1)
+		return nil
+	}
+	TheNetwork.(*MockNetwork).CheckFunc = func(server string, k string) (ObjMeta, bool, error) {
+		nCheckCalls += 1
+		return ObjMeta{}, false, nil
+	}
+
+	k := RandomKeyPrimary(t)
+
+	req := mockGetRequest(t, "key="+k)
+	rr := httptest.NewRecorder()
+	getHandler(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("get request failed: %d", rr.Code)
+	}
+
+	objHeaderBytes := (&ObjHeader{
+		Size:               0,
+		CreatedAtUnixMicro: uint64(time.Now().UnixMicro()),
+		B3sum:              blake3.Sum256([]byte{}),
+	}).ToBytes()
+
+	req = mockReplicateRequest(t, "key="+k, objHeaderBytes[:])
+	rr = httptest.NewRecorder()
+	replicateHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		body, _ := io.ReadAll(rr.Body)
+		t.Logf("body=%s", string(body))
+		t.Fatalf("request failed: %d", rr.Code)
+	}
+	if nReplicationCalls != 1 {
+		t.Fatal("unexpected number of replications")
+	}
+	if nCheckCalls != 1 {
+		t.Fatal("unexpected number of checks")
+	}
+
+	req = mockGetRequest(t, "key="+k)
+	rr = httptest.NewRecorder()
+	getHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("get request failed: %d", rr.Code)
+	}
+
+	TheNetwork.(*MockNetwork).CheckFunc = func(server string, k string) (ObjMeta, bool, error) {
+		nCheckCalls += 1
+		return ObjMeta{}, true, nil
+	}
+
+	objHeaderBytes = (&ObjHeader{
+		Tombstone:          true,
+		Size:               0,
+		CreatedAtUnixMicro: uint64(time.Now().UnixMicro()),
+		B3sum:              blake3.Sum256([]byte{}),
+	}).ToBytes()
+
+	req = mockReplicateRequest(t, "key="+k, objHeaderBytes[:])
+	rr = httptest.NewRecorder()
+	replicateHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		body, _ := io.ReadAll(rr.Body)
+		t.Logf("body=%s", string(body))
+		t.Fatalf("request failed: %d", rr.Code)
+	}
+	if nReplicationCalls != 2 {
+		t.Fatal("unexpected number of replications")
+	}
+	if nCheckCalls != 2 {
+		t.Fatal("unexpected number of checks")
+	}
+
+	TheNetwork.(*MockNetwork).CheckFunc = func(server string, k string) (ObjMeta, bool, error) {
+		nCheckCalls += 1
+		return ObjMeta{Tombstone: true}, true, nil
+	}
+
+	req = mockReplicateRequest(t, "key="+k, objHeaderBytes[:])
+	rr = httptest.NewRecorder()
+	replicateHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		body, _ := io.ReadAll(rr.Body)
+		t.Logf("body=%s", string(body))
+		t.Fatalf("request failed: %d", rr.Code)
+	}
+	if nReplicationCalls != 2 {
+		t.Fatal("unexpected number of replications")
+	}
+	if nCheckCalls != 3 {
+		t.Fatal("unexpected number of checks")
+	}
+
+	req = mockGetRequest(t, "key="+k)
+	rr = httptest.NewRecorder()
+	getHandler(rr, req)
+	if rr.Code != http.StatusGone {
+		t.Fatalf("get request failed: %d", rr.Code)
+	}
+
+}
+
+func TestSecondaryReplicate(t *testing.T) {
+	PrepareForTest(t)
+
+	nReplicationCalls := uint64(0)
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
+		atomic.AddUint64(&nReplicationCalls, 1)
+		return nil
+	}
+
+	k := RandomKeySecondary(t)
 
 	req := mockGetRequest(t, "key="+k)
 	rr := httptest.NewRecorder()
@@ -193,18 +364,16 @@ func TestSecondaryPut(t *testing.T) {
 		t.Fatalf("get request failed: %d", rr.Code)
 	}
 
-	objStamp := ObjStamp{
+	objHeader := ObjHeader{
+		Size:               0,
 		CreatedAtUnixMicro: uint64(time.Now().UnixMicro()),
+		B3sum:              blake3.Sum256([]byte{}),
 	}
-	objStampBytes := objStamp.ToBytes()
-	objHash := blake3.Sum256(objStampBytes[:])
-	obj := [40]byte{}
-	copy(obj[0:32], objHash[:])
-	copy(obj[32:40], objStampBytes[:])
+	objHeaderBytes := objHeader.ToBytes()
 
-	req = mockPutRequest(t, "key="+k+"&type=replicate", string(obj[:]))
+	req = mockReplicateRequest(t, "key="+k, objHeaderBytes[:])
 	rr = httptest.NewRecorder()
-	putHandler(rr, req)
+	replicateHandler(rr, req)
 	if rr.Code != http.StatusOK {
 		body, _ := io.ReadAll(rr.Body)
 		t.Logf("body=%s", string(body))
@@ -222,7 +391,7 @@ func TestSecondaryPut(t *testing.T) {
 	}
 }
 
-func TestRejectsCorrupt(t *testing.T) {
+func TestReplicateRejectsCorrupt(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
@@ -231,14 +400,29 @@ func TestRejectsCorrupt(t *testing.T) {
 		return nil
 	}
 
-	k := RandomKeyForThisLocation(t)
+	k := RandomKeyPrimary(t)
 
 	rr := httptest.NewRecorder()
-	req := mockPutRequest(t, "key="+k+"&type=replicate", "replicate data with no header xxxxxxxxxxx")
-	putHandler(rr, req)
+	req := mockReplicateRequest(t, "key="+k, []byte("replicate data with no header xxxxxxxxxxx"))
+	replicateHandler(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		body, _ := io.ReadAll(rr.Body)
 		t.Logf("body=%s", string(body))
 		t.Fatalf("request failed: %d", rr.Code)
 	}
+}
+
+func TestReplicateRejectsOther(t *testing.T) {
+    PrepareForTest(t)
+
+    k := RandomKeyOther(t)
+
+    rr := httptest.NewRecorder()
+    req := mockReplicateRequest(t, "key="+k, []byte{})
+    replicateHandler(rr, req)
+    if rr.Code != http.StatusMisdirectedRequest {
+        body, _ := io.ReadAll(rr.Body)
+        t.Logf("body=%s", string(body))
+        t.Fatalf("request failed: %d", rr.Code)
+    }
 }

@@ -86,30 +86,32 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 		atomic.AddUint64(&_totalScrubbedBytes, uint64(stat.Size()))
 	}
 
-	stampBytes := [8]byte{}
-	_, err = objF.ReadAt(stampBytes[:], 32)
+	headerBytes := [OBJECT_HEADER_SIZE]byte{}
+	_, err = io.ReadFull(objF, headerBytes[:])
 	if err != nil {
 		logScrubError(SCRUB_EOTHER, "scrubber unable to read %q: %s", objPath, err)
 	}
 
-	stamp := ObjStampFromBytes(stampBytes[:])
+	header, ok := ObjHeaderFromBytes(headerBytes[:])
+	if !ok {
+		log.Printf("scrub detected corrupt file header at %q, removing it", objPath)
+		err := os.Remove(objPath)
+		if err != nil {
+			logScrubError(SCRUB_ECORRUPT, "io error removing %q: %s", objPath, err)
+		}
+		return
+	}
 
 	if opts.Full {
-		expectedHash := [32]byte{}
-		actualHash := [32]byte{}
-		_, err := io.ReadFull(objF, expectedHash[:])
-		if err != nil && !errors.Is(err, io.EOF) {
-			logScrubError(SCRUB_EOTHER, "io error scrubbing %q: %s", objPath, err)
-			return
-		}
+		actualB3sum := [32]byte{}
 		hasher := blake3.New(32, nil)
 		_, err = io.Copy(hasher, objF)
 		if err != nil {
 			logScrubError(SCRUB_EOTHER, "io error scrubbing %q: %s", objPath, err)
 			return
 		}
-		copy(actualHash[:], hasher.Sum(nil))
-		if expectedHash != actualHash {
+		copy(actualB3sum[:], hasher.Sum(nil))
+		if actualB3sum != header.B3sum {
 			log.Printf("scrub detected corrupt file at %q, removing it", objPath)
 			err = os.Remove(objPath)
 			if err != nil {
@@ -125,7 +127,7 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 		}
 
 		// We only trust a tombstone after it has been fully scrubbed.
-		if stamp.IsExpired(time.Now(), TOMBSTONE_EXPIRY) {
+		if header.IsExpired(time.Now(), TOMBSTONE_EXPIRY) {
 			log.Printf("scrubber removing %q, it has expired", objPath)
 			err := os.Remove(objPath)
 			if err != nil {
@@ -133,7 +135,10 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 			}
 			return
 		}
-
+	} else {
+		if header.IsExpired(time.Now(), TOMBSTONE_EXPIRY) {
+			return
+		}
 	}
 
 	if ThisLocation.Equals(primaryLoc) {
@@ -145,7 +150,7 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 				continue
 			}
 			if ok {
-				if stamp.Tombstone && !meta.Tombstone {
+				if header.Tombstone && !meta.Tombstone {
 					// Both have the data, but they disagree about the deletion state.
 					log.Printf("scrubber replicating tombstone of %q to %s", k, server)
 					err := ReplicateObj(server, k, objF)
@@ -163,12 +168,12 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 		}
 	} else {
 		primaryServer := primaryLoc[len(primaryLoc)-1]
-		meta, ok, err := CheckObj(primaryServer, k)
+		_, ok, err := CheckObj(primaryServer, k)
 		if err != nil {
 			logScrubError(SCRUB_EREPL, "scrubber was unable to verify primary placement of %q: %s", k, err)
 			return
 		}
-		if !ok || (stamp.Tombstone && !meta.Tombstone) {
+		if !ok {
 			if !ok {
 				log.Printf("restoring %q to primary server %s", k, primaryServer)
 			} else {
@@ -180,9 +185,24 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 				return
 			}
 		}
+
+		// TODO!! XXX!! race condition!!
+		// Imagine there are just two servers with two object replicas:
+		// 
+		// 1. Config is updated to single replica.
+		// 2. This server updates config and decides it no longer wants the object.
+		// 3. This server checks the other server has the object and it does.
+		// 4. Config is updated again reversing the placement.
+		// 5. The other server gets this config first and decides it no longer wants the object.
+		// 6. The other server checks this server and finds the object.
+		// 7. Both servers delete the object.
+
 		keepObject := false
 		for i := 0; i < len(locs); i++ {
 			keepObject = keepObject || ThisLocation.Equals(locs[i])
+			if keepObject {
+				break
+			}
 		}
 		if !keepObject {
 			log.Printf("scrubber removing %q, it has been moved", k)

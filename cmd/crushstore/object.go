@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"net/url"
 	"os"
@@ -26,7 +27,7 @@ var (
 const (
 	TOMBSTONE_EXPIRY   = 120 * time.Second // TODO a real/configurable value.
 	OBJECT_DIR_SHARDS  = 4096
-	OBJECT_HEADER_SIZE = 40
+	OBJECT_HEADER_SIZE = 52
 )
 
 type ObjMeta struct {
@@ -35,34 +36,52 @@ type ObjMeta struct {
 	CreatedAtUnixMicro uint64
 }
 
-type ObjStamp struct {
+type ObjHeader struct {
+	Checksum           uint32
 	Tombstone          bool
 	CreatedAtUnixMicro uint64
+	Size               uint64
+	B3sum              [32]byte
 }
 
-func ObjStampFromBytes(b []byte) ObjStamp {
-	stamp := ObjStamp{}
-	stamp.FieldsFromBytes(b[:])
-	return stamp
-}
-
-func (s *ObjStamp) IsExpired(now time.Time, timeout time.Duration) bool {
-	return s.Tombstone && time.UnixMicro(int64(s.CreatedAtUnixMicro)).Add(timeout).Before(now)
-}
-
-func (s *ObjStamp) FieldsFromBytes(b []byte) {
-	stamp := binary.BigEndian.Uint64(b)
-	s.Tombstone = (stamp >> 63) != 0
-	s.CreatedAtUnixMicro = (stamp << 1) >> 1
-}
-
-func (s *ObjStamp) ToBytes() [8]byte {
-	stamp := s.CreatedAtUnixMicro
-	if s.Tombstone {
-		stamp |= 1 << 63
+func ObjHeaderFromBytes(b []byte) (ObjHeader, bool) {
+	if len(b) < OBJECT_HEADER_SIZE {
+		return ObjHeader{}, false
 	}
-	b := [8]byte{}
-	binary.BigEndian.PutUint64(b[:], stamp)
+	stamp := ObjHeader{}
+	ok := stamp.FieldsFromBytes(b)
+	return stamp, ok
+}
+
+func (h *ObjHeader) IsExpired(now time.Time, timeout time.Duration) bool {
+	return h.Tombstone && time.UnixMicro(int64(h.CreatedAtUnixMicro)).Add(timeout).Before(now)
+}
+
+func (h *ObjHeader) FieldsFromBytes(b []byte) bool {
+	if len(b) < OBJECT_HEADER_SIZE {
+		return false
+	}
+	if binary.BigEndian.Uint32(b[0:4]) != crc32.ChecksumIEEE(b[4:OBJECT_HEADER_SIZE]) {
+		return false
+	}
+	timev := binary.BigEndian.Uint64(b[4:12])
+	h.Tombstone = (timev >> 63) != 0
+	h.CreatedAtUnixMicro = (timev << 1) >> 1
+	h.Size = binary.BigEndian.Uint64(b[12:20])
+	copy(h.B3sum[:], b[20:52])
+	return true
+}
+
+func (h *ObjHeader) ToBytes() [OBJECT_HEADER_SIZE]byte {
+	timev := h.CreatedAtUnixMicro
+	if h.Tombstone {
+		timev |= 1 << 63
+	}
+	b := [OBJECT_HEADER_SIZE]byte{}
+	binary.BigEndian.PutUint64(b[4:12], timev)
+	binary.BigEndian.PutUint64(b[12:20], h.Size)
+	copy(b[20:52], h.B3sum[:])
+	binary.BigEndian.PutUint32(b[0:4], crc32.ChecksumIEEE(b[4:]))
 	return b
 }
 
@@ -130,13 +149,19 @@ func (it *ObjectIter) Next() (ObjectIterEntry, bool, error) {
 				}
 				return ObjectIterEntry{}, false, err
 			}
-			stampBytes := [8]byte{}
-			_, err = objf.ReadAt(stampBytes[:], 32)
+			headerBytes := [OBJECT_HEADER_SIZE]byte{}
+			_, err = io.ReadFull(objf, headerBytes[:])
 			_ = objf.Close()
 			if err != nil {
+				if errors.Is(err, io.ErrUnexpectedEOF) {
+					continue
+				}
 				return ObjectIterEntry{}, false, err
 			}
-			stamp := ObjStampFromBytes(stampBytes[:])
+			hdr, ok := ObjHeaderFromBytes(headerBytes[:])
+			if !ok {
+				continue
+			}
 			key, err := url.QueryUnescape(ent.Name())
 			if err != nil {
 				continue
@@ -144,9 +169,9 @@ func (it *ObjectIter) Next() (ObjectIterEntry, bool, error) {
 			it.buffer = append(it.buffer, ObjectIterEntry{
 				Key: key,
 				ObjMeta: ObjMeta{
-					Tombstone:          stamp.Tombstone,
-					CreatedAtUnixMicro: stamp.CreatedAtUnixMicro,
-					Size:               uint64(ent.Size()),
+					Tombstone:          hdr.Tombstone,
+					CreatedAtUnixMicro: hdr.CreatedAtUnixMicro,
+					Size:               hdr.Size,
 				},
 			})
 		}

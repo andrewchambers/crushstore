@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/andrewchambers/crushstore/clusterconfig"
 	"golang.org/x/sync/errgroup"
@@ -203,14 +205,13 @@ func (c *Client) Put(k string, data io.ReadSeeker, opts PutOptions) error {
 				redirects += 1
 				continue
 			}
-			// TODO HA put to other servers, then scrub will balance it out.
 			return err
 		}
 		return nil
 	}
 }
 
-func (c *Client) _get(server string, k string, into io.Writer, opts GetOptions) error {
+func (c *Client) get(server string, k string, into io.Writer, opts GetOptions) error {
 
 	endpoint := fmt.Sprintf("%s/get?key=%s", server, url.QueryEscape(k))
 	resp, err := c.http.Get(endpoint)
@@ -223,7 +224,6 @@ func (c *Client) _get(server string, k string, into io.Writer, opts GetOptions) 
 		return responseError(server, resp)
 	}
 
-	// Writer the body to file
 	_, err = io.Copy(into, resp.Body)
 	if err != nil {
 		return err
@@ -253,7 +253,7 @@ func (c *Client) Get(k string, into io.Writer, opts GetOptions) (bool, error) {
 			if alreadyVisited {
 				break
 			}
-			err := c._get(server, k, into, opts)
+			err := c.get(server, k, into, opts)
 			if err != nil {
 				if err, ok := err.(*ClientRequestError); ok {
 					if err.StatusCode == 404 {
@@ -284,7 +284,7 @@ func (c *Client) Get(k string, into io.Writer, opts GetOptions) (bool, error) {
 	}
 }
 
-func (c *Client) _delete(server string, k string, opts DeleteOptions) error {
+func (c *Client) delete(server string, k string, opts DeleteOptions) error {
 	endpoint := fmt.Sprintf("%s/delete?key=%s", server, url.QueryEscape(k))
 	resp, err := c.http.PostForm(endpoint, url.Values{})
 	if err != nil {
@@ -311,16 +311,151 @@ func (c *Client) Delete(k string, opts DeleteOptions) error {
 	server := locs[0][len(locs[0])-1]
 	redirects := 0
 	for {
-		err := c._delete(server, k, opts)
+		err := c.delete(server, k, opts)
 		if err != nil {
 			if err, ok := err.(*ClientRequestError); ok && err.Redirect != "" && redirects < MAX_REDIRECTS {
 				server = err.Redirect
 				redirects += 1
 				continue
 			}
-			// TODO HA delete to other servers, then scrub will balance it out.
 			return err
 		}
 		return nil
 	}
+}
+
+func (c *Client) iterBegin(server string, typ string) (string, error) {
+	endpoint := fmt.Sprintf("%s/iter_begin?type=%s", server, url.QueryEscape(typ))
+	resp, err := c.http.PostForm(endpoint, url.Values{})
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", responseError(server, resp)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	cursor := ""
+	err = json.Unmarshal(body, &cursor)
+	if err != nil {
+		return "", err
+	}
+	return cursor, nil
+}
+
+func (c *Client) iterNext(server string, cursor string, iterOut interface{}) error {
+	endpoint := fmt.Sprintf("%s/iter_next?it=%s", server, url.QueryEscape(cursor))
+	resp, err := c.http.PostForm(endpoint, url.Values{})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return responseError(server, resp)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	err = json.Unmarshal(body, iterOut)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+type RemoteObjectMetadata struct {
+	Server    string
+	Key string
+	Size      uint64
+	Tombstone bool
+	CreatedAt time.Time
+}
+
+type ListOptions struct {
+}
+
+func (c *Client) List(cb func(RemoteObjectMetadata) bool, opts ListOptions) error {
+	cfg := c.GetClusterConfig()
+	for _, node := range cfg.StorageHierarchy.StorageNodes {
+		if node.IsDefunct() {
+			continue
+		}
+		server := node.Location[len(node.Location)-1]
+		cursor, err := c.iterBegin(server, "objects")
+		if err != nil {
+			return err
+		}
+		objects := []struct {
+			Key                string
+			Size               uint64
+			Tombstone          bool
+			CreatedAtUnixMicro uint64
+		}{}
+		for {
+			err := c.iterNext(server, cursor, &objects)
+			if err != nil {
+				return err
+			}
+			if len(objects) == 0 {
+				break
+			}
+			for _, o := range objects {
+				cont := cb(RemoteObjectMetadata{
+					Server:    server,
+					Key:       o.Key,
+					Size:      o.Size,
+					Tombstone: o.Tombstone,
+					CreatedAt: time.UnixMicro(int64(o.CreatedAtUnixMicro)),
+				})
+				if !cont {
+					return nil
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+type RemoteKey struct {
+	Server    string
+	Key string
+}
+
+type ListKeysOptions struct {
+}
+
+func (c *Client) ListKeys(cb func(RemoteKey) bool, opts ListKeysOptions) error {
+	cfg := c.GetClusterConfig()
+	for _, node := range cfg.StorageHierarchy.StorageNodes {
+		if node.IsDefunct() {
+			continue
+		}
+		server := node.Location[len(node.Location)-1]
+		cursor, err := c.iterBegin(server, "keys")
+		if err != nil {
+			return err
+		}
+		keys := []string{}
+		for {
+			err := c.iterNext(server, cursor, &keys)
+			if err != nil {
+				return err
+			}
+			if len(keys) == 0 {
+				break
+			}
+			for _, k := range keys {
+				if !cb(RemoteKey{Server: server, Key: k}) {
+					return nil
+				}
+			}
+		}
+	}
+
+	return nil
 }

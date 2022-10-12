@@ -142,6 +142,7 @@ type StorageHierarchy struct {
 	Types     []string
 	TypeToIdx map[string]int
 	IdxToType map[int]string
+	StorageNodes []*StorageNode
 	Root      *InternalNode
 }
 
@@ -192,18 +193,18 @@ func (h *StorageHierarchy) ContainsStorageNodeAtLocation(location Location) bool
 
 func (h *StorageHierarchy) AddStorageNode(ni *StorageNodeInfo) error {
 
-	n := &StorageNode{
-		StorageNodeInfo: *ni,
-	}
-
 	// Validate compatible.
-	if len(n.Location) != len(h.Types) {
+	if len(ni.Location) != len(h.Types) {
 		return fmt.Errorf(
 			"location %v is not compatible with type schema %v, expected %d members",
-			n.Location,
+			ni.Location,
 			h.Types,
 			len(h.Types),
 		)
+	}
+
+	n := &StorageNode{
+		StorageNodeInfo: *ni,
 	}
 
 	idBuf := bytes.Buffer{}
@@ -244,6 +245,8 @@ func (h *StorageHierarchy) AddStorageNode(ni *StorageNodeInfo) error {
 			node.NameToChild[loc] = n
 		}
 	}
+
+	h.StorageNodes = append(h.StorageNodes, n)
 
 	return nil
 }
@@ -332,9 +335,6 @@ func (h *StorageHierarchy) Crush(input string, selections []CrushSelection) ([]L
 
 func (h *StorageHierarchy) doSelect(parent Node, input int64, count int, nodeTypeIdx int, c Comparitor) []Node {
 	var results []Node
-	//if len(parent.Children) < count {
-	//	panic("Asked for more node than are available")
-	//}
 	var rPrime = int64(0)
 	for r := 1; r <= count; r++ {
 		var failure = 0

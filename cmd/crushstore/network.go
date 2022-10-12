@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 
 	"golang.org/x/sync/errgroup"
@@ -30,13 +31,18 @@ type Network interface {
 type realNetwork struct{}
 
 func (network *realNetwork) ReplicateObj(server string, k string, f *os.File) error {
+
+	_, err := f.Seek(0, io.SeekStart)
+	if err != nil {
+		return err
+	}
+
 	r, w := io.Pipe()
 	mpw := multipart.NewWriter(w)
 	errg, _ := errgroup.WithContext(context.Background())
 	errg.Go(func() error {
 		var part io.Writer
 		defer w.Close()
-		defer f.Close()
 		part, err := mpw.CreateFormFile("data", "data")
 		if err != nil {
 			return err
@@ -56,7 +62,7 @@ func (network *realNetwork) ReplicateObj(server string, k string, f *os.File) er
 		_ = errg.Wait()
 	}()
 
-	endpoint := fmt.Sprintf("%s/put?key=%s&type=replicate", server, k)
+	endpoint := fmt.Sprintf("%s/replicate?key=%s", server, url.QueryEscape(k))
 	resp, err := http.Post(endpoint, mpw.FormDataContentType(), r)
 	if err != nil {
 		return err
@@ -67,8 +73,12 @@ func (network *realNetwork) ReplicateObj(server string, k string, f *os.File) er
 		return fmt.Errorf("unable to read response from %s: %s", endpoint, err)
 	}
 
+	if resp.StatusCode == http.StatusMisdirectedRequest {
+		return fmt.Errorf("server %s rejected key %q", server, k)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("post object %q to %s failed: %s, body=%q", k, endpoint, resp.Status, body)
+		return fmt.Errorf("replication of %q to %s failed: %s, body=%q", k, endpoint, resp.Status, body)
 	}
 
 	uploadErr := errg.Wait()
@@ -80,15 +90,15 @@ func (network *realNetwork) ReplicateObj(server string, k string, f *os.File) er
 }
 
 func (network *realNetwork) CheckObj(server string, k string) (ObjMeta, bool, error) {
-	endpoint := fmt.Sprintf("%s/check?key=%s", server, k)
+	endpoint := fmt.Sprintf("%s/check?key=%s", server, url.QueryEscape(k))
 	resp, err := http.Get(endpoint)
 	if err != nil {
-		return ObjMeta{}, false, fmt.Errorf("unable to check %q@%s", k, server)
+		return ObjMeta{}, false, fmt.Errorf("unable to check %q@%s: %w", k, server, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return ObjMeta{}, false, fmt.Errorf("unable to read check body for %q@%s", k, server)
+		return ObjMeta{}, false, fmt.Errorf("unable to read check body for %q@%s: %w", k, server, err)
 	}
 
 	if resp.StatusCode == http.StatusNotFound {
@@ -96,7 +106,7 @@ func (network *realNetwork) CheckObj(server string, k string) (ObjMeta, bool, er
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return ObjMeta{}, false, fmt.Errorf("unable to check %q@%s: %s", k, server, err)
+		return ObjMeta{}, false, fmt.Errorf("unable to check %q@%s: %s", k, server, resp.Status)
 	}
 
 	stat := ObjMeta{}
@@ -105,8 +115,8 @@ func (network *realNetwork) CheckObj(server string, k string) (ObjMeta, bool, er
 }
 
 type MockNetwork struct {
-	ReplicateFunc func(string, string, *os.File) error
-	CheckFunc     func(string, string) (ObjMeta, bool, error)
+	ReplicateFunc func(server string, k string, f *os.File) error
+	CheckFunc     func(server string, k string) (ObjMeta, bool, error)
 }
 
 func (network *MockNetwork) ReplicateObj(server string, k string, f *os.File) error {
