@@ -2,26 +2,32 @@
 
 A horizontally scaling object store based on the CRUSH placement algorithm.
 
+## How it works
+
+All clients and nodes in the storage cluster have a copy of the cluster configuration,
+when a request for an object arrives, we are able to locate the subset of servers it 
+should be stored on efficiently without network communication - Conceptually it is like
+it like a distributed hash table lookup.
+
 ## Use cases and limitations
 
-CrushStore is designed to be an operationally simple ho
+CrushStore is designed to be an operationally simple object store that you use 
+as part of a larger storage system. Generally you would store keys in some other
+database and use this to lookup items.
 
+Like a hash table, it supports the following operations:
 
 - Save an object associated with a key.
-- Get an object by key.
+- Get an object associated with a given key.
 - Delete an object associated with a key.
-- List all keys.
+- Unordered listing of keys.
 
-## Limitations
+Unlike a hash table, CrushStore has an additional constraint:
 
-### Key/Value immutability
-
-Each key must have a unique value - e.g. a uuid or some other unique identifier tied to a immutable data. This restriction allows uploads to be idempotent and simplifies the system.
-
-### No ordered listing
-
-There is no global ordering 
- 
+Each key can only ever have a single unique value associated with it, for example each key
+could be a uuid that you should never reuse for different data.
+This restriction simplifies the system as there are never any conflicting values during
+distributed replication.
 
 # Getting started
 
