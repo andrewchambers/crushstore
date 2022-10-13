@@ -90,11 +90,11 @@ func mockCheckRequest(t *testing.T, query string) *http.Request {
 	return req
 }
 
-func TestPrimaryPutAndGet(t *testing.T) {
+func TestPutAndGet(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File, opts ReplicateOpts) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -141,33 +141,11 @@ func TestPrimaryPutAndGet(t *testing.T) {
 	}
 }
 
-func TestSecondaryPut(t *testing.T) {
+func TestDelete(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
-		atomic.AddUint64(&nReplicationCalls, 1)
-		return nil
-	}
-
-	k := RandomKeySecondary(t)
-
-	req := mockPutRequest(t, "key="+k, []byte("hello"))
-	rr := httptest.NewRecorder()
-	putHandler(rr, req)
-	if rr.Code != http.StatusMovedPermanently {
-		body, _ := io.ReadAll(rr.Body)
-		t.Logf("body=%s", string(body))
-		t.Fatalf("request failed: %d", rr.Code)
-	}
-
-}
-
-func TestPrimaryDelete(t *testing.T) {
-	PrepareForTest(t)
-
-	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File, opts ReplicateOpts) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -218,33 +196,12 @@ func TestPrimaryDelete(t *testing.T) {
 	}
 }
 
-func TestSecondaryDelete(t *testing.T) {
-	PrepareForTest(t)
-
-	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
-		atomic.AddUint64(&nReplicationCalls, 1)
-		return nil
-	}
-
-	k := RandomKeySecondary(t)
-	req := mockDeleteRequest(t, "key="+k)
-	rr := httptest.NewRecorder()
-	deleteHandler(rr, req)
-	if rr.Code != http.StatusMovedPermanently {
-		body, _ := io.ReadAll(rr.Body)
-		t.Logf("body=%s", string(body))
-		t.Fatalf("request failed: %d", rr.Code)
-	}
-
-}
-
-func TestPrimaryReplicate(t *testing.T) {
+func TestReplicateWithFanout(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
 	nCheckCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File, opts ReplicateOpts) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -268,7 +225,7 @@ func TestPrimaryReplicate(t *testing.T) {
 		B3sum:              blake3.Sum256([]byte{}),
 	}).ToBytes()
 
-	req = mockReplicateRequest(t, "key="+k, objHeaderBytes[:])
+	req = mockReplicateRequest(t, "key="+k+"&fanout=true", objHeaderBytes[:])
 	rr = httptest.NewRecorder()
 	replicateHandler(rr, req)
 	if rr.Code != http.StatusOK {
@@ -302,7 +259,7 @@ func TestPrimaryReplicate(t *testing.T) {
 		B3sum:              blake3.Sum256([]byte{}),
 	}).ToBytes()
 
-	req = mockReplicateRequest(t, "key="+k, objHeaderBytes[:])
+	req = mockReplicateRequest(t, "key="+k+"&fanout=true", objHeaderBytes[:])
 	rr = httptest.NewRecorder()
 	replicateHandler(rr, req)
 	if rr.Code != http.StatusOK {
@@ -322,7 +279,7 @@ func TestPrimaryReplicate(t *testing.T) {
 		return ObjMeta{Tombstone: true}, true, nil
 	}
 
-	req = mockReplicateRequest(t, "key="+k, objHeaderBytes[:])
+	req = mockReplicateRequest(t, "key="+k+"&fanout=true", objHeaderBytes[:])
 	rr = httptest.NewRecorder()
 	replicateHandler(rr, req)
 	if rr.Code != http.StatusOK {
@@ -346,11 +303,11 @@ func TestPrimaryReplicate(t *testing.T) {
 
 }
 
-func TestSecondaryReplicate(t *testing.T) {
+func TestReplicateNoFanout(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File, opts ReplicateOpts) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -395,7 +352,7 @@ func TestReplicateRejectsCorrupt(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(server string, k string, f *os.File, opts ReplicateOpts) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}

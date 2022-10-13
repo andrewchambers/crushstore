@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/andrewchambers/crushstore/clusterconfig"
 	"golang.org/x/sync/errgroup"
 	"lukechampine.com/blake3"
 )
@@ -63,13 +64,6 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 		}
 		return
 	}
-
-	locs, err := GetClusterConfig().Crush(k)
-	if err != nil {
-		logScrubError(SCRUB_EOTHER, "scrubber unable to place %q: %s", objPath, err)
-		return
-	}
-	primaryLoc := locs[0]
 
 	objF, err := os.Open(objPath)
 	if err != nil {
@@ -141,11 +135,37 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 		}
 	}
 
+	var clusterConfig *clusterconfig.ClusterConfig
+
+rebalanceAgain:
+
+	if clusterConfig == nil {
+		clusterConfig = GetClusterConfig()
+	} else {
+		log.Printf("misdirected scrub replication triggering config reload")
+		newConfig, err := ReloadClusterConfig()
+		if err != nil {
+			logScrubError(SCRUB_EOTHER, "scrubber unable to reload config: %s", err)
+			return
+		}
+		clusterConfig = newConfig
+	}
+
+	locs, err := clusterConfig.Crush(k)
+	if err != nil {
+		logScrubError(SCRUB_EOTHER, "scrubber unable to place %q: %s", objPath, err)
+		return
+	}
+	primaryLoc := locs[0]
+
 	if ThisLocation.Equals(primaryLoc) {
 		for i := 1; i < len(locs); i++ {
 			server := locs[i][len(locs[i])-1]
 			meta, ok, err := CheckObj(server, k)
 			if err != nil {
+				if err == ErrMisdirectedRequest {
+					goto rebalanceAgain
+				}
 				logScrubError(SCRUB_EREPL, "scrubber check failed: %s", err)
 				continue
 			}
@@ -153,15 +173,21 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 				if header.Tombstone && !meta.Tombstone {
 					// Both have the data, but they disagree about the deletion state.
 					log.Printf("scrubber replicating tombstone of %q to %s", k, server)
-					err := ReplicateObj(server, k, objF)
+					err := ReplicateObj(server, k, objF, ReplicateOpts{})
 					if err != nil {
+						if err == ErrMisdirectedRequest {
+							goto rebalanceAgain
+						}
 						logScrubError(SCRUB_EREPL, "scrubber replication of %q failed: %s", k, err)
 					}
 				}
 			} else {
 				log.Printf("scrubber replicating %q to %s", k, server)
-				err := ReplicateObj(server, k, objF)
+				err := ReplicateObj(server, k, objF, ReplicateOpts{})
 				if err != nil {
+					if err == ErrMisdirectedRequest {
+						goto rebalanceAgain
+					}
 					logScrubError(SCRUB_EREPL, "scrubber replication of %q failed: %s", k, err)
 				}
 			}
@@ -170,6 +196,9 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 		primaryServer := primaryLoc[len(primaryLoc)-1]
 		_, ok, err := CheckObj(primaryServer, k)
 		if err != nil {
+			if err == ErrMisdirectedRequest {
+				goto rebalanceAgain
+			}
 			logScrubError(SCRUB_EREPL, "scrubber was unable to verify primary placement of %q: %s", k, err)
 			return
 		}
@@ -179,8 +208,11 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 			} else {
 				log.Printf("scrubber replicating tombstone of %q to %s", k, primaryServer)
 			}
-			err := ReplicateObj(primaryServer, k, objF)
+			err := ReplicateObj(primaryServer, k, objF, ReplicateOpts{Fanout: true})
 			if err != nil {
+				if err == ErrMisdirectedRequest {
+					goto rebalanceAgain
+				}
 				logScrubError(SCRUB_EREPL, "scrubber replication of %q failed: %s", k, err)
 				return
 			}
@@ -212,6 +244,7 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 			}
 		}
 	}
+
 }
 
 type ScrubOpts struct {
@@ -237,7 +270,6 @@ func Scrub(opts ScrubOpts) {
 		replicationErrorCount := atomic.LoadUint64(&_totalScrubReplicationErrorCount) - startTotalReplicationErrorCount
 		corruptionErrorCount := atomic.LoadUint64(&_totalScrubCorruptionErrorCount) - startTotalCorruptionErrorCount
 		otherErrorCount := atomic.LoadUint64(&_totalScrubOtherErrorCount) - startTotalOtherErrorCount
-		errorCount := replicationErrorCount + corruptionErrorCount + otherErrorCount
 
 		scrubRecord = ScrubRecord{
 			LastFullScrubUnix:              scrubRecord.LastFullScrubUnix,
@@ -254,7 +286,7 @@ func Scrub(opts ScrubOpts) {
 
 		SaveScrubRecord(scrubRecord)
 
-		log.Printf("scrubbed %d object(s), %d byte(s) with %d error(s)", scrubbedObjects, scrubbedBytes, errorCount)
+		log.Printf("scrubbed %d object(s), %d byte(s) with %d error(s)", scrubbedObjects, scrubbedBytes, scrubRecord.ErrorCount())
 		atomic.StoreUint64(&_scrubInProgress, 0)
 	}()
 
@@ -354,12 +386,14 @@ func ScrubForever() {
 			startCfg := GetClusterConfig()
 			Scrub(ScrubOpts{Full: full}) // XXX config full and not.
 			endCfg := GetClusterConfig()
-			if startCfg == endCfg {
-				doScrub = false
-			}
-			// Don't repeat a full scrub.
 			full = false
+			if startCfg == endCfg && !LastScrubHadErrors() {
+				doScrub = false
+			} else {
+				time.Sleep(1 * time.Second)
+			}
 		}
+
 		select {
 		case <-scrubTicker.C:
 		case <-_scrubTrigger:
@@ -385,6 +419,16 @@ type ScrubRecord struct {
 	LastScrubOtherErrorCount       uint64
 	LastScrubBytes                 uint64
 	LastScrubObjects               uint64
+}
+
+func (sr *ScrubRecord) ErrorCount() uint64 {
+	return sr.LastScrubReplicationErrorCount + sr.LastScrubCorruptionErrorCount + sr.LastScrubOtherErrorCount
+}
+
+func LastScrubHadErrors() bool {
+	_lastScrubLock.Lock()
+	defer _lastScrubLock.Unlock()
+	return _lastScrub.ErrorCount() != 0
 }
 
 func GetScrubRecord() ScrubRecord {

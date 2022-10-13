@@ -52,6 +52,13 @@ func checkHandler(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	if misdirected {
+		// It's possible our config is out of date and not the remote.
+		log.Printf("misdirected check triggering config reload")
+		_, err := ReloadClusterConfig()
+		if err != nil {
+			internalError(w, "error reloading config: %s", err)
+			return
+		}
 		w.WriteHeader(http.StatusMisdirectedRequest)
 		return
 	}
@@ -201,22 +208,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 	objPath := ObjectPathFromKey(k)
 	objDir := filepath.Dir(objPath)
 
-	locs, err := GetClusterConfig().Crush(k)
-	if err != nil {
-		internalError(w, "error placing %q: %s", k, err)
-		return
-	}
-	primaryLoc := locs[0]
-	isPrimary := primaryLoc.Equals(ThisLocation)
-
-	if !isPrimary {
-		endpoint := fmt.Sprintf("%s/put?key=%s", primaryLoc[len(primaryLoc)-1], k)
-		log.Printf("redirecting put %q to %s", k, endpoint)
-		http.Redirect(w, req, endpoint, http.StatusMovedPermanently)
-		return
-	}
-
-	err = req.ParseMultipartForm(1024 * 1024)
+	err := req.ParseMultipartForm(1024 * 1024)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		io.WriteString(w, fmt.Sprintf("unable to read upload: %s", err))
@@ -242,7 +234,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		if removeTmp {
 			err := os.Remove(tmpF.Name())
 			if err != nil {
-				log.Printf("io error removing %q", tmpF.Name())
+				log.Printf("io error removing %q: %s", tmpF.Name(), err)
 			}
 		}
 	}()
@@ -302,6 +294,16 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	// Do the fanout on the temporary object so the scrubber doesn't interfere.
+	err = fanoutObject(k, tmpF.Name(), fanoutOpts{
+		Tombstone: false,
+		DoCheck:   false,
+	})
+	if err != nil {
+		internalError(w, "unable to fanout %q: %s", k, err)
+		return
+	}
+
 	err = tmpF.Sync()
 	if err != nil {
 		internalError(w, "io error syncing %q: %s", tmpF.Name(), err)
@@ -316,54 +318,94 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 
 	err = os.Rename(tmpF.Name(), objPath)
 	if err != nil {
-		internalError(w, "io overwriting %q: %s", objPath, err)
-		return
+		internalError(w, "io error renaming %q to %q: %s", tmpF.Name(), objPath, err)
 	}
 	removeTmp = false
 
 	err = flushDir(objDir)
 	if err != nil {
-		internalError(w, "io error flushing %q: %s", objDir, err)
+		internalError(w, "io error flushing: %s", err)
+	}
+
+}
+
+func deleteHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	// We are the primary, we must spread the
-	// data to all the other nodes in the placement.
-	wg := &sync.WaitGroup{}
-	successfulReplications := new(uint64)
-	*successfulReplications = 1
-
-	for i := 1; i < len(locs); i++ {
-		loc := locs[i]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			server := loc[len(loc)-1]
-
-			objF, err := os.Open(objPath)
-			if err != nil {
-				log.Printf("io error opening %q: %s", objPath, err)
-				return
-			}
-			defer objF.Close()
-			log.Printf("replicating %q to %s", k, server)
-			err = ReplicateObj(server, k, objF)
-			if err != nil {
-				log.Printf("error replicating %q: %s", objPath, err)
-				return
-			}
-
-			atomic.AddUint64(successfulReplications, 1)
-		}()
-	}
-
-	wg.Wait()
-
-	minReplicas := uint64(len(locs))
-	if *successfulReplications < minReplicas { // XXX we could add a 'min replication param'
-		w.WriteHeader(http.StatusInternalServerError)
+	k := url.QueryEscape(req.FormValue("key"))
+	if k == "" {
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+
+	objPath := ObjectPathFromKey(k)
+	objDir := filepath.Dir(objPath)
+
+	tmpF, err := os.CreateTemp(objDir, "obj*$tmp")
+	if err != nil {
+		internalError(w, "io error creating temporary file: %s", err)
+		return
+	}
+	defer tmpF.Close()
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			err := os.Remove(tmpF.Name())
+			if err != nil {
+				log.Printf("io removing %q: %s", tmpF.Name(), err)
+			}
+		}
+	}()
+
+	objHeader := ObjHeader{
+		Tombstone:          true,
+		CreatedAtUnixMicro: uint64(time.Now().UnixMicro()),
+		Size:               0,
+		B3sum:              blake3.Sum256([]byte{}),
+	}
+	objHeaderBytes := objHeader.ToBytes()
+	_, err = tmpF.Write(objHeaderBytes[:])
+	if err != nil {
+		internalError(w, "io error writing %q: %s", tmpF.Name(), err)
+		return
+	}
+
+	// Do the fanout on the temporary object so the scrubber doesn't interfere.
+	err = fanoutObject(k, tmpF.Name(), fanoutOpts{
+		Tombstone: true,
+		DoCheck:   false,
+	})
+	if err != nil {
+		internalError(w, "unable to fanout %q: %s", k, err)
+		return
+	}
+
+	err = tmpF.Sync()
+	if err != nil {
+		internalError(w, "io error syncing %q: %s", tmpF.Name(), err)
+		return
+	}
+
+	err = tmpF.Close()
+	if err != nil {
+		internalError(w, "io error closing %q: %s", tmpF.Name(), err)
+		return
+	}
+
+	err = os.Rename(tmpF.Name(), objPath)
+	if err != nil {
+		internalError(w, "io error renaming %q to %q: %s", tmpF.Name(), objPath, err)
+	}
+	removeTmp = false
+
+	err = flushDir(objDir)
+	if err != nil {
+		internalError(w, "io error flushing: %s", err)
+	}
+
 }
 
 func replicateHandler(w http.ResponseWriter, req *http.Request) {
@@ -395,6 +437,12 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 		if misdirected {
+			log.Printf("misdirected replication triggering config reload")
+			_, err := ReloadClusterConfig()
+			if err != nil {
+				internalError(w, "error reloading config: %s", err)
+				return
+			}
 			w.WriteHeader(http.StatusMisdirectedRequest)
 			return
 		}
@@ -519,6 +567,19 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 		// Fallthrough, we must check + replicate for safety.
 	}
 
+	if req.FormValue("fanout") == "true" {
+		// Do the fanout on the temporary object so the scrubber doesn't interfere.
+		err = fanoutObject(k, tmpF.Name(),
+			fanoutOpts{
+				Tombstone: header.Tombstone,
+				DoCheck:   true,
+			})
+		if err != nil {
+			internalError(w, "unable to fanout %q: %s", k, err)
+			return
+		}
+	}
+
 	err = tmpF.Sync()
 	if err != nil {
 		internalError(w, "io error syncing %q: %s", tmpF.Name(), err)
@@ -533,188 +594,109 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 
 	err = os.Rename(tmpF.Name(), objPath)
 	if err != nil {
-		internalError(w, "io overwriting %q: %s", objPath, err)
-		return
+		internalError(w, "io error renaming %q to %q: %s", tmpF.Name(), objPath, err)
 	}
 	removeTmp = false
 
 	err = flushDir(objDir)
 	if err != nil {
-		internalError(w, "io error flushing %q: %s", objDir, err)
-		return
-	}
-
-	if !isPrimary {
-		return
-	}
-
-	// We are the primary, we must spread the
-	// data to all the other nodes in the placement.
-	wg := &sync.WaitGroup{}
-	successfulReplications := new(uint64)
-	*successfulReplications = 1
-	for i := 1; i < len(locs); i++ {
-		loc := locs[i]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			server := loc[len(loc)-1]
-
-			meta, ok, err := CheckObj(server, k)
-			if err != nil {
-				log.Printf("error checking %q@%s: %s", k, server, err)
-				return
-			}
-			if ok && (header.Tombstone == meta.Tombstone || meta.Tombstone) {
-				// We don't need to replicate if the remote has matching objects and
-				// the tombstones match or the remote node has already deleted this key.
-				atomic.AddUint64(successfulReplications, 1)
-				return
-			}
-
-			objF, err := os.Open(objPath)
-			if err != nil {
-				log.Printf("io error opening %q: %s", objPath, err)
-				return
-			}
-			defer objF.Close()
-			log.Printf("replicating %q to %s", k, server)
-			err = ReplicateObj(server, k, objF)
-			if err != nil {
-				log.Printf("error replicating %q: %s", objPath, err)
-				return
-			}
-
-			atomic.AddUint64(successfulReplications, 1)
-		}()
-	}
-
-	wg.Wait()
-
-	minReplicas := uint64(len(locs))
-	if *successfulReplications != minReplicas { // XXX we could add a 'min replication param'
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		internalError(w, "io error flushing: %s", err)
 	}
 }
 
-func deleteHandler(w http.ResponseWriter, req *http.Request) {
-	if req.Method != "POST" {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
+type fanoutOpts struct {
+	Tombstone bool
+	DoCheck   bool
+}
 
-	k := url.QueryEscape(req.FormValue("key"))
-	if k == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	objPath := ObjectPathFromKey(k)
-	objDir := filepath.Dir(objPath)
-
-	locs, err := GetClusterConfig().Crush(k)
-	if err != nil {
-		internalError(w, "error placing %q: %s", k, err)
-		return
-	}
-	primaryLoc := locs[0]
-
-	if !primaryLoc.Equals(ThisLocation) {
-		endpoint := fmt.Sprintf("%s/delete?key=%s", primaryLoc[len(primaryLoc)-1], k)
-		log.Printf("redirecting delete %q to %s", k, endpoint)
-		http.Redirect(w, req, endpoint, http.StatusMovedPermanently)
-		return
-	}
-
-	tmpF, err := os.CreateTemp(objDir, "obj*$tmp")
-	if err != nil {
-		internalError(w, "io error creating temporary file: %s", err)
-		return
-	}
-	defer tmpF.Close()
-	removeTmp := true
-	defer func() {
-		if removeTmp {
-			err := os.Remove(tmpF.Name())
-			if err != nil {
-				log.Printf("io removing %q: %s", tmpF.Name(), err)
-			}
-		}
-	}()
-
-	objHeader := ObjHeader{
-		Tombstone:          true,
-		CreatedAtUnixMicro: uint64(time.Now().UnixMicro()),
-		Size:               0,
-		B3sum:              blake3.Sum256([]byte{}),
-	}
-	objHeaderBytes := objHeader.ToBytes()
-	_, err = tmpF.Write(objHeaderBytes[:])
-	if err != nil {
-		internalError(w, "io error writing %q: %s", tmpF.Name(), err)
-		return
-	}
-
-	err = tmpF.Sync()
-	if err != nil {
-		internalError(w, "io error syncing %q: %s", tmpF.Name(), err)
-		return
-	}
-
-	err = tmpF.Close()
-	if err != nil {
-		internalError(w, "io error closing %q: %s", tmpF.Name(), err)
-		return
-	}
-
-	err = os.Rename(tmpF.Name(), objPath)
-	if err != nil {
-		internalError(w, "io overwriting %q: %s", objPath, err)
-		return
-	}
-	removeTmp = false
+func fanoutObject(k string, objPath string, opts fanoutOpts) error {
 
 	wg := &sync.WaitGroup{}
-	successfulReplications := new(uint64)
+	successfulReplications := uint64(0)
+	misdirectedErrors := uint64(0)
+	conflictErrors := uint64(0)
 
-	for i := 1; i < len(locs); i++ {
-		loc := locs[i]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			server := loc[len(loc)-1]
-			objF, err := os.Open(objPath)
-			if err != nil {
-				log.Printf("io error opening %q: %s", objPath, err)
-				return
+	for {
+		successfulReplications = 0
+		misdirectedErrors = 0
+		conflictErrors = 0
+
+		locs, err := GetClusterConfig().Crush(k)
+		if err != nil {
+			return fmt.Errorf("error placing %q: %s", k, err)
+		}
+
+		for i := 0; i < len(locs); i++ {
+			loc := locs[i]
+
+			if ThisLocation.Equals(loc) {
+				atomic.AddUint64(&successfulReplications, 1)
+				continue
 			}
-			defer objF.Close()
-			log.Printf("replicating deletion of %q to %s", k, server)
-			err = ReplicateObj(server, k, objF)
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				server := loc[len(loc)-1]
+
+				if opts.DoCheck {
+					meta, ok, err := CheckObj(server, k)
+					if err != nil {
+						log.Printf("error checking %q on %s: %s", k, server, err)
+						if err == ErrMisdirectedRequest {
+							atomic.AddUint64(&misdirectedErrors, 1)
+						}
+						return
+					}
+					if ok && opts.Tombstone == meta.Tombstone {
+						atomic.AddUint64(&successfulReplications, 1)
+						return
+					}
+				}
+
+				objF, err := os.Open(objPath)
+				if err != nil {
+					log.Printf("io error opening %q: %s", objPath, err)
+					return
+				}
+				defer objF.Close()
+				log.Printf("replicating %q to %s", k, server)
+				err = ReplicateObj(server, k, objF, ReplicateOpts{})
+				if err != nil {
+					log.Printf("error replicating %q to %s: %s", k, server, err)
+					if err == ErrMisdirectedRequest {
+						atomic.AddUint64(&misdirectedErrors, 1)
+					}
+					return
+				}
+
+				atomic.AddUint64(&successfulReplications, 1)
+			}()
+		}
+
+		wg.Wait()
+
+		if conflictErrors != 0 {
+			return ErrReplicationConflict
+		}
+
+		if misdirectedErrors != 0 {
+			log.Printf("misdirected fanout triggering config reload")
+			// We tried to replicate to a server that did not want the object,
+			// one of the two has an out of date cluster layout.
+			_, err = ReloadClusterConfig()
 			if err != nil {
-				log.Printf("error replicating %q: %s", objPath, err)
-				return
+				return err
 			}
-			atomic.AddUint64(successfulReplications, 1)
-		}()
+			continue
+		}
+
+		minReplicas := uint64(len(locs))
+		if successfulReplications < minReplicas {
+			return fmt.Errorf("unable to replicate %q to %d servers", k, minReplicas)
+		}
+		return nil
 	}
-
-	err = flushDir(objDir)
-	if err == nil {
-		atomic.AddUint64(successfulReplications, 1)
-	} else {
-		log.Printf("io error flushing %q: %s", objDir, err)
-	}
-
-	wg.Wait()
-
-	minReplicas := uint64(len(locs))
-	if *successfulReplications < minReplicas { // XXX we could add a 'min replication param'
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
 }
 
 type expiringIter struct {

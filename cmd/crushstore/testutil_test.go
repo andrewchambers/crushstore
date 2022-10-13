@@ -47,7 +47,7 @@ func PrepareForTest(t *testing.T) {
 		t.Fatal(err)
 	}
 	TheNetwork = &MockNetwork{
-		ReplicateFunc: func(server string, k string, f *os.File) error { return nil },
+		ReplicateFunc: func(server string, k string, f *os.File, opts ReplicateOpts) error { return nil },
 		CheckFunc: func(server string, k string) (ObjMeta, bool, error) {
 			return ObjMeta{}, false, errors.New("not configured")
 		},

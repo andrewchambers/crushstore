@@ -26,3 +26,7 @@ func SetConfigWatcher(w clusterconfig.ConfigWatcher) {
 func GetClusterConfig() *clusterconfig.ClusterConfig {
 	return TheConfigWatcher.GetCurrentConfig()
 }
+
+func ReloadClusterConfig() (*clusterconfig.ClusterConfig, error) {
+	return TheConfigWatcher.ReloadConfig()
+}

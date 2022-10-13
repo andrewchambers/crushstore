@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -15,8 +16,12 @@ import (
 
 var TheNetwork Network = &realNetwork{}
 
-func ReplicateObj(server string, k string, f *os.File) error {
-	return TheNetwork.ReplicateObj(server, k, f)
+type ReplicateOpts struct {
+	Fanout bool
+}
+
+func ReplicateObj(server string, k string, f *os.File, opts ReplicateOpts) error {
+	return TheNetwork.ReplicateObj(server, k, f, opts)
 }
 func CheckObj(server string, k string) (ObjMeta, bool, error) {
 	return TheNetwork.CheckObj(server, k)
@@ -24,13 +29,18 @@ func CheckObj(server string, k string) (ObjMeta, bool, error) {
 
 // Represents the connection to outside nodes.
 type Network interface {
-	ReplicateObj(server string, k string, f *os.File) error
+	ReplicateObj(server string, k string, f *os.File, opts ReplicateOpts) error
 	CheckObj(server string, k string) (ObjMeta, bool, error)
 }
 
 type realNetwork struct{}
 
-func (network *realNetwork) ReplicateObj(server string, k string, f *os.File) error {
+var (
+	ErrMisdirectedRequest  error = errors.New("misdirected request")
+	ErrReplicationConflict error = errors.New("replication conflict")
+)
+
+func (network *realNetwork) ReplicateObj(server string, k string, f *os.File, opts ReplicateOpts) error {
 
 	_, err := f.Seek(0, io.SeekStart)
 	if err != nil {
@@ -62,7 +72,7 @@ func (network *realNetwork) ReplicateObj(server string, k string, f *os.File) er
 		_ = errg.Wait()
 	}()
 
-	endpoint := fmt.Sprintf("%s/replicate?key=%s", server, url.QueryEscape(k))
+	endpoint := fmt.Sprintf("%s/replicate?key=%s&fanout=%t", server, url.QueryEscape(k), opts.Fanout)
 	resp, err := http.Post(endpoint, mpw.FormDataContentType(), r)
 	if err != nil {
 		return err
@@ -74,7 +84,11 @@ func (network *realNetwork) ReplicateObj(server string, k string, f *os.File) er
 	}
 
 	if resp.StatusCode == http.StatusMisdirectedRequest {
-		return fmt.Errorf("server %s rejected key %q", server, k)
+		return ErrMisdirectedRequest
+	}
+
+	if resp.StatusCode == http.StatusConflict {
+		return ErrReplicationConflict
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -105,6 +119,10 @@ func (network *realNetwork) CheckObj(server string, k string) (ObjMeta, bool, er
 		return ObjMeta{}, false, nil
 	}
 
+	if resp.StatusCode == http.StatusMisdirectedRequest {
+		return ObjMeta{}, false, ErrMisdirectedRequest
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return ObjMeta{}, false, fmt.Errorf("unable to check %q@%s: %s", k, server, resp.Status)
 	}
@@ -115,12 +133,12 @@ func (network *realNetwork) CheckObj(server string, k string) (ObjMeta, bool, er
 }
 
 type MockNetwork struct {
-	ReplicateFunc func(server string, k string, f *os.File) error
+	ReplicateFunc func(server string, k string, f *os.File, opts ReplicateOpts) error
 	CheckFunc     func(server string, k string) (ObjMeta, bool, error)
 }
 
-func (network *MockNetwork) ReplicateObj(server string, k string, f *os.File) error {
-	return network.ReplicateFunc(server, k, f)
+func (network *MockNetwork) ReplicateObj(server string, k string, f *os.File, opts ReplicateOpts) error {
+	return network.ReplicateFunc(server, k, f, opts)
 }
 
 func (network *MockNetwork) CheckObj(server string, k string) (ObjMeta, bool, error) {
