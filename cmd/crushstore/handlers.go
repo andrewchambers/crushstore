@@ -154,15 +154,27 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 				internalError(w, "error placing %q: %s", k, err)
 				return
 			}
-			primaryLoc := locs[0]
-			if ThisLocation.Equals(primaryLoc) {
+			misdirected := true
+			for i := 0; i < len(locs); i++ {
+				if locs[i].Equals(ThisLocation) {
+					misdirected = false
+					break
+				}
+			}
+			if misdirected {
+				// It's possible our config is out of date and not the remote.
+				log.Printf("misdirected get triggering config reload")
+				_, err := ReloadClusterConfig()
+				if err != nil {
+					internalError(w, "error reloading config: %s", err)
+					return
+				}
+				w.WriteHeader(http.StatusMisdirectedRequest)
+				return
+			} else {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			endpoint := fmt.Sprintf("%s/get?key=%s", primaryLoc[len(primaryLoc)-1], k)
-			log.Printf("redirecting get %q to %s", k, endpoint)
-			http.Redirect(w, req, endpoint, http.StatusTemporaryRedirect)
-			return
 		}
 		internalError(w, "io error opening %q: %s", objPath, err)
 		return

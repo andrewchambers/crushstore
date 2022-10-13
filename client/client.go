@@ -65,11 +65,7 @@ func New(configPath string, opts ClientOptions) (*Client, error) {
 	configWatcher.OnConfigChange(opts.OnConfigChange)
 
 	return &Client{
-		http: &http.Client{
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		http:          &http.Client{},
 		configWatcher: configWatcher,
 	}, nil
 }
@@ -88,23 +84,8 @@ func responseError(server string, resp *http.Response) error {
 	if err != nil {
 		return fmt.Errorf("unable to response from %s: %s", resp.Request.URL, err)
 	}
-	redirect := ""
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		redirectLoc, _ := resp.Header["Location"]
-		if len(redirectLoc) > 0 {
-			u, err := url.Parse(redirectLoc[0])
-			if err == nil {
-				port := u.Port()
-				if port != "" {
-					port = ":" + port
-				}
-				redirect = fmt.Sprintf("%s://%s%s", u.Scheme, u.Hostname(), port)
-			}
-		}
-	}
 	return &ClientRequestError{
 		Server:     server,
-		Redirect:   redirect,
 		StatusCode: resp.StatusCode,
 		Body:       string(body),
 	}
@@ -164,28 +145,14 @@ func (c *Client) Put(k string, data io.ReadSeeker, opts PutOptions) error {
 	if err != nil {
 		return err
 	}
-
 	// Upload to the primary server.
 	server := locs[0][len(locs[0])-1]
-	redirects := 0
-	for {
-		if redirects != 0 {
-			_, err := data.Seek(0, io.SeekStart)
-			if err != nil {
-				return err
-			}
-		}
-		err := c._put(server, k, data, opts)
-		if err != nil {
-			if err, ok := err.(*ClientRequestError); ok && err.Redirect != "" && redirects < MAX_REDIRECTS {
-				server = err.Redirect
-				redirects += 1
-				continue
-			}
-			return err
-		}
-		return nil
+	err = c._put(server, k, data, opts)
+	if err != nil {
+		// XXX HA option to put to a different server, or with fewer required replications?
+		return err
 	}
+	return nil
 }
 
 func (c *Client) get(server string, k string, into io.Writer, opts GetOptions) error {
@@ -209,47 +176,37 @@ func (c *Client) get(server string, k string, into io.Writer, opts GetOptions) e
 	return nil
 }
 
-type GetOptions struct {
-	KnownExisting bool
-}
+type GetOptions struct{}
 
 func (c *Client) Get(k string, into io.Writer, opts GetOptions) (bool, error) {
+
 	locs, err := c.GetClusterConfig().Crush(k)
 	if err != nil {
 		return false, err
 	}
 
 	errs := []error{}
-	visited := make(map[string]struct{})
 	for _, loc := range locs {
 		server := loc[len(loc)-1]
-		redirects := 0
-		for {
-			_, alreadyVisited := visited[server]
-			visited[server] = struct{}{}
-			if alreadyVisited {
-				break
-			}
-			err := c.get(server, k, into, opts)
-			if err != nil {
-				if err, ok := err.(*ClientRequestError); ok {
-					if err.StatusCode == 404 {
-						continue
+		err := c.get(server, k, into, opts)
+		if err != nil {
+			if err, ok := err.(*ClientRequestError); ok {
+				/*
+					if err.StatusCode == http.StatusMisdirectedRequest {
+						// XXX Reload client config here and try again?
 					}
-					if err.StatusCode == 410 {
-						return false, nil
-					}
-					if err.Redirect != "" && redirects < MAX_REDIRECTS {
-						server = err.Redirect
-						redirects += 1
-						continue
-					}
+				*/
+				if err.StatusCode == http.StatusNotFound {
+					continue
 				}
-				errs = append(errs, err)
-				break
+				if err.StatusCode == http.StatusGone {
+					return false, nil
+				}
 			}
-			return true, nil
+			errs = append(errs, err)
+			break
 		}
+		return true, nil
 	}
 	switch len(errs) {
 	case 0:
@@ -283,22 +240,13 @@ func (c *Client) Delete(k string, opts DeleteOptions) error {
 	if err != nil {
 		return err
 	}
-
 	// Delete at the primary server.
 	server := locs[0][len(locs[0])-1]
-	redirects := 0
-	for {
-		err := c.delete(server, k, opts)
-		if err != nil {
-			if err, ok := err.(*ClientRequestError); ok && err.Redirect != "" && redirects < MAX_REDIRECTS {
-				server = err.Redirect
-				redirects += 1
-				continue
-			}
-			return err
-		}
-		return nil
+	err = c.delete(server, k, opts)
+	if err != nil {
+		return err
 	}
+	return nil
 }
 
 func (c *Client) iterBegin(server string, typ string) (string, error) {
