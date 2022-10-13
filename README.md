@@ -6,8 +6,11 @@ A horizontally scaling object store based on the CRUSH placement algorithm.
 
 All clients and nodes in the storage cluster have a copy of the cluster configuration,
 when a request for an object arrives, we are able to locate the subset of servers it 
-should be stored on efficiently without network communication - Conceptually it is like
+should be stored on without network communication - conceptually it is like
 it like a distributed hash table lookup.
+
+Periodically all storage nodes will 'scrub' their data directory looking for corrupt objects and
+ensuring the storage placement requirements are met, replicating data to other nodes if they are not. 
 
 ## Use cases and limitations
 
