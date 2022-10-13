@@ -42,7 +42,7 @@ $ git clone https://github.com/andrewchambers/crushstore
 $ cd crushstore
 $ go build ./cmd/...
 $ mkdir bin
-$ cp  $(find ./cmd -type f -executable) ./bin
+$ cp $(find ./cmd -type f -executable) ./bin
 $ ls ./bin
 crushstore
 crushstore-delete
