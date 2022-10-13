@@ -293,7 +293,7 @@ func OpenObjectDir(location crush.Location, dir string) error {
 			)
 		}
 	} else if errors.Is(err, os.ErrNotExist) {
-		os.WriteFile(locationFile, locationBytes, 0o755)
+		os.WriteFile(locationFile, locationBytes, 0o644)
 	} else {
 		return err
 	}
