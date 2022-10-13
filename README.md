@@ -6,8 +6,8 @@ A horizontally scaling object store based on the CRUSH placement algorithm.
 
 All clients and nodes in the storage cluster have a copy of the cluster configuration,
 when a request for an object arrives, we are able to locate the subset of servers it 
-should be stored on without network communication - conceptually it is like
-it like a distributed hash table lookup.
+should be stored on without network communication - conceptually it is similar
+to a distributed hash table lookup.
 
 Periodically (and after configuration changes), all storage nodes will 'scrub' their data
 directory looking for corrupt objects and ensuring the storage placement requirements are met,
@@ -120,13 +120,16 @@ do
 done
 ```
 
-Change a 'healthy' line in the config to 'defunct' and wait for crushstore to reload the config:
+Change a 'healthy' line in the config to 'defunct' and change the relative
+weight of one of the storage nodes, then wait for crushstore to reload the config:
+
+
 ```
 ...
 storage-nodes:
-    - 100 healthy http://127.0.0.1:5000
+    - 50 healthy http://127.0.0.1:5000
     - 100 defunct http://127.0.0.1:5001
     - 100 healthy http://127.0.0.1:5002
 ```
 
-The crushstore scrubber job will rebalance data to maintain the desired placement rule.
+The crushstore scrubber job will rebalance data to maintain the desired placement rules and weighting.
