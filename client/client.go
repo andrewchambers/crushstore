@@ -10,8 +10,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/andrewchambers/crushstore/clusterconfig"
@@ -42,68 +40,47 @@ func (e *MultiError) Error() string {
 }
 
 type Client struct {
-	http                *http.Client
-	config              atomic.Value
-	configWorkerContext context.Context
-	cancelConfigWorker  func()
-	workerWg            sync.WaitGroup
+	http          *http.Client
+	configWatcher clusterconfig.ConfigWatcher
 }
 
 type ClientOptions struct {
-	OnConfigError func(err error)
+	OnConfigChange func(cfg *clusterconfig.ClusterConfig, err error)
 }
 
 func New(configPath string, opts ClientOptions) (*Client, error) {
 
-	if opts.OnConfigError == nil {
-		opts.OnConfigError = func(err error) {
-			log.Printf("error reloading config: %s", err)
+	if opts.OnConfigChange == nil {
+		opts.OnConfigChange = func(cfg *clusterconfig.ClusterConfig, err error) {
+			if err != nil {
+				log.Printf("error reloading client config: %s", err)
+			}
 		}
 	}
 
-	c := &Client{
+	configWatcher, err := clusterconfig.NewConfigFileWatcher(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("error loading initial config: %w", err)
+	}
+	configWatcher.OnConfigChange(opts.OnConfigChange)
+
+	return &Client{
 		http: &http.Client{
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		},
-	}
-
-	config, err := clusterconfig.LoadClusterConfigFromFile(configPath)
-	if err != nil {
-		return nil, err
-	}
-	c.config.Store(config)
-
-	c.configWorkerContext, c.cancelConfigWorker = context.WithCancel(context.Background())
-
-	c.workerWg.Add(1)
-	go func() {
-		defer c.workerWg.Done()
-		clusterconfig.WatchClusterConfig(c.configWorkerContext, configPath, func(newConfig *clusterconfig.ClusterConfig, err error) {
-			if err != nil {
-				opts.OnConfigError(err)
-				return
-			}
-			oldConfig := c.GetClusterConfig()
-			if !bytes.Equal(oldConfig.ConfigBytes, newConfig.ConfigBytes) {
-				c.config.Store(newConfig)
-			}
-		})
-	}()
-
-	return c, nil
+		configWatcher: configWatcher,
+	}, nil
 }
 
 func (c *Client) Close() error {
-	c.cancelConfigWorker()
-	c.workerWg.Wait()
+	c.configWatcher.Stop()
 	return nil
 }
 
 func (c *Client) GetClusterConfig() *clusterconfig.ClusterConfig {
-	config, _ := c.config.Load().(*clusterconfig.ClusterConfig)
-	return config
+	return c.configWatcher.GetCurrentConfig()
 }
 
 func responseError(server string, resp *http.Response) error {
@@ -369,7 +346,7 @@ func (c *Client) iterNext(server string, cursor string, iterOut interface{}) err
 
 type RemoteObjectMetadata struct {
 	Server    string
-	Key string
+	Key       string
 	Size      uint64
 	Tombstone bool
 	CreatedAt time.Time
@@ -422,8 +399,8 @@ func (c *Client) List(cb func(RemoteObjectMetadata) bool, opts ListOptions) erro
 }
 
 type RemoteKey struct {
-	Server    string
-	Key string
+	Server string
+	Key    string
 }
 
 type ListKeysOptions struct {

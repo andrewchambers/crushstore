@@ -188,7 +188,7 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 
 		// TODO!! XXX!! race condition!!
 		// Imagine there are just two servers with two object replicas:
-		// 
+		//
 		// 1. Config is updated to single replica.
 		// 2. This server updates config and decides it no longer wants the object.
 		// 3. This server checks the other server has the object and it does.

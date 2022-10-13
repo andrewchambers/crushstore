@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/andrewchambers/crushstore/clusterconfig"
 	"github.com/andrewchambers/crushstore/crush"
 	"github.com/google/shlex"
 )
@@ -47,10 +48,12 @@ func main() {
 		log.Fatalf("error preparing -data-dir: %s", err)
 	}
 
-	err = LoadClusterConfigFromFile(*clusterConfigFile)
+	configWatcher, err := clusterconfig.NewConfigFileWatcher(*clusterConfigFile)
 	if err != nil {
 		log.Fatalf("error loading initial config: %s", err)
 	}
+	SetConfigWatcher(configWatcher)
+
 	log.Printf("serving hierarchy:\n%s\n", GetClusterConfig().StorageHierarchy.AsciiTree())
 
 	http.HandleFunc("/put", putHandler)
@@ -64,7 +67,6 @@ func main() {
 	log.Printf("serving location %v", ThisLocation)
 	log.Printf("serving on %s", *listenAddress)
 
-	go WatchClusterConfigForever(*clusterConfigFile)
 	go ScrubForever()
 
 	err = http.ListenAndServe(*listenAddress, nil)

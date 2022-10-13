@@ -127,18 +127,18 @@ func TestPrimaryPutAndGet(t *testing.T) {
 		t.Fatalf("get request failed: %d", rr.Code)
 	}
 
-    // Putting the same object twice should replicate again.
-    req = mockPutRequest(t, "key="+k, []byte("hello"))
-    rr = httptest.NewRecorder()
-    putHandler(rr, req)
-    if rr.Code != http.StatusOK {
-        body, _ := io.ReadAll(rr.Body)
-        t.Logf("body=%s", string(body))
-        t.Fatalf("request failed: %d", rr.Code)
-    }
-    if nReplicationCalls != 2 {
-        t.Fatal("unexpected number of replications")
-    }
+	// Putting the same object twice should replicate again.
+	req = mockPutRequest(t, "key="+k, []byte("hello"))
+	rr = httptest.NewRecorder()
+	putHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		body, _ := io.ReadAll(rr.Body)
+		t.Logf("body=%s", string(body))
+		t.Fatalf("request failed: %d", rr.Code)
+	}
+	if nReplicationCalls != 2 {
+		t.Fatal("unexpected number of replications")
+	}
 }
 
 func TestSecondaryPut(t *testing.T) {
@@ -413,16 +413,16 @@ func TestReplicateRejectsCorrupt(t *testing.T) {
 }
 
 func TestReplicateRejectsOther(t *testing.T) {
-    PrepareForTest(t)
+	PrepareForTest(t)
 
-    k := RandomKeyOther(t)
+	k := RandomKeyOther(t)
 
-    rr := httptest.NewRecorder()
-    req := mockReplicateRequest(t, "key="+k, []byte{})
-    replicateHandler(rr, req)
-    if rr.Code != http.StatusMisdirectedRequest {
-        body, _ := io.ReadAll(rr.Body)
-        t.Logf("body=%s", string(body))
-        t.Fatalf("request failed: %d", rr.Code)
-    }
+	rr := httptest.NewRecorder()
+	req := mockReplicateRequest(t, "key="+k, []byte{})
+	replicateHandler(rr, req)
+	if rr.Code != http.StatusMisdirectedRequest {
+		body, _ := io.ReadAll(rr.Body)
+		t.Logf("body=%s", string(body))
+		t.Fatalf("request failed: %d", rr.Code)
+	}
 }

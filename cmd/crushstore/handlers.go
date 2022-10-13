@@ -45,7 +45,7 @@ func checkHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	misdirected := true
-	for i := 0 ; i < len(locs); i++ {
+	for i := 0; i < len(locs); i++ {
 		if locs[i].Equals(ThisLocation) {
 			misdirected = false
 			break
@@ -378,7 +378,6 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-
 	locs, err := GetClusterConfig().Crush(k)
 	if err != nil {
 		internalError(w, "error placing %q: %s", k, err)
@@ -389,7 +388,7 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 
 	if !isPrimary {
 		misdirected := true
-		for i := 1 ; i < len(locs); i++ {
+		for i := 1; i < len(locs); i++ {
 			if locs[i].Equals(ThisLocation) {
 				misdirected = false
 				break
@@ -400,7 +399,6 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	}
-
 
 	objPath := ObjectPathFromKey(k)
 	objDir := filepath.Dir(objPath)

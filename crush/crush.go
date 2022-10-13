@@ -139,11 +139,11 @@ func (n *InternalNode) Select(input int64, round int64) Node {
 }
 
 type StorageHierarchy struct {
-	Types     []string
-	TypeToIdx map[string]int
-	IdxToType map[int]string
+	Types        []string
+	TypeToIdx    map[string]int
+	IdxToType    map[int]string
 	StorageNodes []*StorageNode
-	Root      *InternalNode
+	Root         *InternalNode
 }
 
 func NewStorageHierarchyFromSchema(s string) (*StorageHierarchy, error) {

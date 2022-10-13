@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/andrewchambers/crushstore/crush"
@@ -133,53 +135,114 @@ func ParseClusterConfig(configYamlBytes []byte) (*ClusterConfig, error) {
 	return newConfig, nil
 }
 
-func LoadClusterConfigFromFile(configPath string) (*ClusterConfig, error) {
+type ConfigWatcher interface {
+	GetCurrentConfig() *ClusterConfig
+	ReloadConfig() (*ClusterConfig, error)
+	OnConfigChange(func(*ClusterConfig, error))
+	Stop()
+}
+
+type ConfigFileWatcher struct {
+	configPath       string
+	currentConfig    atomic.Value
+	reloadLock       sync.Mutex
+	lastUpdate       time.Time
+	onChangeCallback func(*ClusterConfig, error)
+	cancelWorker     func()
+	workerWg         sync.WaitGroup
+}
+
+func NewConfigFileWatcher(configPath string) (*ConfigFileWatcher, error) {
+
 	configBytes, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, err
 	}
 	config, err := ParseClusterConfig(configBytes)
 	if err != nil {
-		return nil, fmt.Errorf("error loading %s: %w", configPath, err)
+		return nil, fmt.Errorf("error parsing %s: %w", configPath, err)
 	}
-	return config, nil
+
+	watcher := &ConfigFileWatcher{
+		configPath:       configPath,
+		lastUpdate:       time.Now(),
+		onChangeCallback: func(cfg *ClusterConfig, err error) {},
+	}
+
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	watcher.cancelWorker = cancelWorker
+	watcher.currentConfig.Store(config)
+	watcher.workerWg.Add(1)
+	go func() {
+		defer watcher.workerWg.Done()
+
+		checkTicker := time.NewTicker(30 * time.Second)
+		defer checkTicker.Stop()
+
+		for {
+			select {
+			case <-workerCtx.Done():
+				return
+			case <-checkTicker.C:
+				_, _ = watcher.ReloadConfig()
+			}
+		}
+	}()
+
+	return watcher, nil
 }
 
-func WatchClusterConfig(ctx context.Context, configPath string, onChange func(cfg *ClusterConfig, err error)) {
-	lastUpdate := time.Now()
-	for {
-		// Check the config on fixed unix time boundaries, this
-		// means our cluster is more likely to reload their configs
-		// in sync when polling a network config.
-		const RELOAD_BOUNDARY = 60
-		nowUnix := time.Now().Unix()
-		delaySecs := int64(RELOAD_BOUNDARY / 2)
-		// XXX loop is dumb (but works).
-		for {
-			if (nowUnix+delaySecs)%RELOAD_BOUNDARY == 0 {
-				break
-			}
-			delaySecs += 1
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Duration(delaySecs) * time.Second):
-		}
+func (w *ConfigFileWatcher) GetCurrentConfig() *ClusterConfig {
+	cfg, _ := w.currentConfig.Load().(*ClusterConfig)
+	return cfg
+}
 
-		stat, err := os.Stat(configPath)
-		if err != nil {
-			onChange(nil, fmt.Errorf("unable to stat config: %w", err))
-			continue
-		}
-		if stat.ModTime().After(lastUpdate) {
-			cfg, err := LoadClusterConfigFromFile(configPath)
-			if err != nil {
-				onChange(nil, err)
-				continue
-			}
-			onChange(cfg, nil)
-			lastUpdate = stat.ModTime()
-		}
+func (w *ConfigFileWatcher) OnConfigChange(cb func(cfg *ClusterConfig, err error)) {
+	w.reloadLock.Lock()
+	defer w.reloadLock.Unlock()
+	w.onChangeCallback = cb
+}
+
+func (w *ConfigFileWatcher) ReloadConfig() (*ClusterConfig, error) {
+	w.reloadLock.Lock()
+	defer w.reloadLock.Unlock()
+
+	stat, err := os.Stat(w.configPath)
+	if err != nil {
+		w.onChangeCallback(nil, err)
+		return nil, err
 	}
+
+	currentConfig := w.GetCurrentConfig()
+
+	if !stat.ModTime().After(w.lastUpdate) {
+		return currentConfig, nil
+	}
+
+	configBytes, err := os.ReadFile(w.configPath)
+	if err != nil {
+		w.onChangeCallback(nil, err)
+		return nil, err
+	}
+
+	if bytes.Equal(currentConfig.ConfigBytes, configBytes) {
+		return currentConfig, nil
+	}
+
+	newConfig, err := ParseClusterConfig(configBytes)
+	if err != nil {
+		err = fmt.Errorf("error parsing %s: %w", w.configPath, err)
+		w.onChangeCallback(nil, err)
+		return nil, err
+	}
+
+	w.currentConfig.Store(newConfig)
+	w.onChangeCallback(newConfig, nil)
+	w.lastUpdate = stat.ModTime()
+	return newConfig, nil
+}
+
+func (w *ConfigFileWatcher) Stop() {
+	w.cancelWorker()
+	w.workerWg.Wait()
 }

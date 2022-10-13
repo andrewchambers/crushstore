@@ -22,6 +22,24 @@ storage-nodes:
     - 100 healthy http://127.0.0.1:5002
 `
 
+type MockConfigWatcher struct {
+	config *clusterconfig.ClusterConfig
+}
+
+func (w *MockConfigWatcher) GetCurrentConfig() *clusterconfig.ClusterConfig {
+	return w.config
+}
+
+func (w *MockConfigWatcher) OnConfigChange(cb func(cfg *clusterconfig.ClusterConfig, err error)) {
+}
+
+func (w *MockConfigWatcher) ReloadConfig() (*clusterconfig.ClusterConfig, error) {
+	return w.config, nil
+}
+
+func (w *MockConfigWatcher) Stop() {
+}
+
 func PrepareForTest(t *testing.T) {
 	ThisLocation = crush.Location{"http://127.0.0.1:5000"}
 	err := OpenObjectDir(ThisLocation, t.TempDir())
@@ -34,11 +52,13 @@ func PrepareForTest(t *testing.T) {
 			return ObjMeta{}, false, errors.New("not configured")
 		},
 	}
-	cfg, err := clusterconfig.ParseClusterConfig([]byte(TestConfig))
+	config, err := clusterconfig.ParseClusterConfig([]byte(TestConfig))
 	if err != nil {
 		t.Fatal(err)
 	}
-	SetClusterConfig(cfg)
+	SetConfigWatcher(&MockConfigWatcher{
+		config: config,
+	})
 }
 
 func RandomKeyPrimary(t *testing.T) string {
