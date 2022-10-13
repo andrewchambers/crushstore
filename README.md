@@ -9,8 +9,9 @@ when a request for an object arrives, we are able to locate the subset of server
 should be stored on without network communication - conceptually it is like
 it like a distributed hash table lookup.
 
-Periodically all storage nodes will 'scrub' their data directory looking for corrupt objects and
-ensuring the storage placement requirements are met, replicating data to other nodes if they are not. 
+Periodically (and after configuration changes), all storage nodes will 'scrub' their data
+directory looking for corrupt objects and ensuring the storage placement requirements are met,
+replicating data to other nodes if they are not. 
 
 ## Use cases and limitations
 
