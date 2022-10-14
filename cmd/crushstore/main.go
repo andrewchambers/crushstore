@@ -56,6 +56,7 @@ func main() {
 
 	log.Printf("serving hierarchy:\n%s\n", GetClusterConfig().StorageHierarchy.AsciiTree())
 
+	http.HandleFunc("/placement", placementHandler)
 	http.HandleFunc("/put", putHandler)
 	http.HandleFunc("/get", getHandler)
 	http.HandleFunc("/head", headHandler)

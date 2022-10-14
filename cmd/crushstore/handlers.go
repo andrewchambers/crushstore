@@ -28,6 +28,31 @@ func internalError(w http.ResponseWriter, format string, a ...interface{}) {
 	w.Write([]byte("internal server error"))
 }
 
+func placementHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "GET" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	q := req.URL.Query()
+	k := q.Get("key")
+	if k == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	locs, err := GetClusterConfig().Crush(k)
+	if err != nil {
+		internalError(w, "error placing %q: %s", k, err)
+		return
+	}
+	buf, err := json.Marshal(locs)
+	if err != nil {
+		internalError(w, "error marshalling response: %s", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(buf)
+}
+
 type objectContentReadSeeker struct {
 	f *os.File
 }
