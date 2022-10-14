@@ -20,12 +20,13 @@ import (
 )
 
 var (
+	ObjectTombstoneExpiry = 60 * 24 * time.Hour
+
 	ObjectDir      string
 	ObjectDirLockF *os.File
 )
 
 const (
-	TOMBSTONE_EXPIRY   = 120 * time.Second // TODO a real/configurable value.
 	OBJECT_DIR_SHARDS  = 4096
 	OBJECT_HEADER_SIZE = 52
 )
@@ -66,8 +67,8 @@ func (h *ObjHeader) After(o *ObjHeader) bool {
 	}
 }
 
-func (h *ObjHeader) IsExpired(now time.Time, timeout time.Duration) bool {
-	return h.Tombstone && time.UnixMicro(int64(h.CreatedAtUnixMicro)).Add(timeout).Before(now)
+func (h *ObjHeader) IsExpired(now time.Time) bool {
+	return h.Tombstone && time.UnixMicro(int64(h.CreatedAtUnixMicro)).Add(ObjectTombstoneExpiry).Before(now)
 }
 
 func (h *ObjHeader) FieldsFromBytes(b []byte) bool {

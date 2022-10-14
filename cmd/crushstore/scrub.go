@@ -21,6 +21,10 @@ import (
 )
 
 var (
+	ScrubParallelism  = 4
+	ScrubInterval     = 24 * time.Hour
+	FullScrubInterval = 7 * 24 * time.Hour
+
 	_scrubTrigger                    chan struct{} = make(chan struct{}, 1)
 	_totalScrubbedBytes              uint64
 	_totalScrubbedObjects            uint64
@@ -121,7 +125,7 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 		}
 
 		// We only trust a tombstone after it has been fully scrubbed.
-		if header.IsExpired(time.Now(), TOMBSTONE_EXPIRY) {
+		if header.IsExpired(time.Now()) {
 			log.Printf("scrubber removing %q, it has expired", objPath)
 			err := os.Remove(objPath)
 			if err != nil {
@@ -130,7 +134,7 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 			return
 		}
 	} else {
-		if header.IsExpired(time.Now(), TOMBSTONE_EXPIRY) {
+		if header.IsExpired(time.Now()) {
 			return
 		}
 	}
@@ -202,7 +206,7 @@ rebalanceAgain:
 			}
 		}
 
-		// TODO!! XXX!! race condition!!
+		// XXX: race condition.
 		// Imagine there are just two servers with two object replicas:
 		//
 		// 1. Config is updated to single replica.
@@ -212,6 +216,9 @@ rebalanceAgain:
 		// 5. The other server gets this config first and decides it no longer wants the object.
 		// 6. The other server checks this server and finds the object.
 		// 7. Both servers delete the object.
+		//
+		// This race condition seems like it would be extremely unlikely,
+		// but we should verify this or find a suitable fix.
 
 		keepObject := false
 		for i := 0; i < len(locs); i++ {
@@ -277,8 +284,8 @@ func Scrub(opts ScrubOpts) {
 	dispatch := make(chan string)
 
 	errg, _ := errgroup.WithContext(context.Background())
-	const N_SCRUB_WORKERS = 4
-	for i := 0; i < N_SCRUB_WORKERS; i++ {
+
+	for i := 0; i < ScrubParallelism; i++ {
 		errg.Go(func() error {
 			for {
 				path, ok := <-dispatch
@@ -337,10 +344,7 @@ func ScrubForever() {
 
 	doScrub := false
 
-	const SCRUB_INTERVAL = 1 * time.Minute // XXX proper intervals.
-	const FULL_SCRUB_INTERVAL = 5 * time.Minute
-
-	scrubTicker := time.NewTicker(SCRUB_INTERVAL / 2)
+	scrubTicker := time.NewTicker(ScrubInterval / 2)
 	defer scrubTicker.Stop()
 
 	for {
@@ -358,10 +362,10 @@ func ScrubForever() {
 
 		full := false
 
-		if lastScrub.Add(SCRUB_INTERVAL).Before(now) {
+		if lastScrub.Add(ScrubInterval).Before(now) {
 			doScrub = true
 		}
-		if lastFullScrub.Add(FULL_SCRUB_INTERVAL).Before(now) {
+		if lastFullScrub.Add(FullScrubInterval).Before(now) {
 			doScrub = true
 			full = true
 		}

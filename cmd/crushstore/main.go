@@ -15,12 +15,21 @@ var ThisLocation crush.Location
 
 func main() {
 
+	flag.DurationVar(&ObjectTombstoneExpiry, "tombstone-expiry", ObjectTombstoneExpiry, "Time taken for object tombstones to be removed from the system.")
+	flag.DurationVar(&ScrubInterval, "scrub-interval", ScrubInterval, "Time interval between metadata scrubs.")
+	flag.DurationVar(&FullScrubInterval, "full-scrub-interval", FullScrubInterval, "Time between full data scrubs.")
+	flag.IntVar(&ScrubParallelism, "scrub-parallelism", ScrubParallelism, "Number of data objects to scrub in parallel.")
+
 	listenAddress := flag.String("listen-address", "", "Address to listen on.")
 	location := flag.String("location", "", "Storage location specification, defaults to http://${listen-address}.")
 	dataDir := flag.String("data-dir", "", "Directory to store objects under.")
 	clusterConfigFile := flag.String("cluster-config", "./crushstore-cluster.conf", "Path to cluster config.")
 
 	flag.Parse()
+
+	if ScrubParallelism <= 0 {
+		ScrubParallelism = 1
+	}
 
 	if *listenAddress == "" {
 		log.Fatalf("-listen-address not specified.")
