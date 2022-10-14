@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	mathrand "math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,28 +33,14 @@ func checkHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	q := req.URL.Query()
-	k := url.QueryEscape(q.Get("key"))
+	k := q.Get("key")
 	if k == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	locs, err := GetClusterConfig().Crush(k)
-	if err != nil {
-		internalError(w, "error placing %q: %s", k, err)
-		return
-	}
-
-	misdirected := true
-	for i := 0; i < len(locs); i++ {
-		if locs[i].Equals(ThisLocation) {
-			misdirected = false
-			break
-		}
-	}
-	if misdirected {
-		// It's possible our config is out of date and not the remote.
-		log.Printf("misdirected check triggering config reload")
+	if GetClusterConfig().ConfigId != q.Get("cid") {
+		log.Printf("misdirected check triggering config check")
 		_, err := ReloadClusterConfig()
 		if err != nil {
 			internalError(w, "error reloading config: %s", err)
@@ -86,11 +73,7 @@ func checkHandler(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	buf, err := json.Marshal(ObjMeta{
-		Size:               header.Size,
-		Tombstone:          header.Tombstone,
-		CreatedAtUnixMicro: header.CreatedAtUnixMicro,
-	})
+	buf, err := json.Marshal(&header)
 	if err != nil {
 		internalError(w, "error marshalling response: %s", err)
 		return
@@ -140,7 +123,7 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	q := req.URL.Query()
-	k := url.QueryEscape(q.Get("key"))
+	k := q.Get("key")
 	if k == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -162,14 +145,12 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 			if misdirected {
-				// It's possible our config is out of date and not the remote.
-				log.Printf("misdirected get triggering config reload")
-				_, err := ReloadClusterConfig()
-				if err != nil {
-					internalError(w, "error reloading config: %s", err)
-					return
-				}
+				// For get requests we can just redirect to another server.
+				randomLoc := locs[mathrand.Int()%len(locs)]
+				randomServer := randomLoc[len(randomLoc)-1]
+				redirect := fmt.Sprintf("%s/get?key=%s", randomServer, url.QueryEscape(k))
 				w.WriteHeader(http.StatusMisdirectedRequest)
+				http.Redirect(w, req, redirect, http.StatusSeeOther)
 				return
 			} else {
 				w.WriteHeader(http.StatusNotFound)
@@ -195,7 +176,7 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if header.Tombstone {
-		w.WriteHeader(http.StatusGone)
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
@@ -211,7 +192,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	k := url.QueryEscape(req.FormValue("key"))
+	k := req.FormValue("key")
 	if k == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -276,40 +257,9 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	existingF, err := os.Open(objPath)
-	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			internalError(w, "io error opening %q: %s", objPath, err)
-			return
-		}
-	}
-	if existingF != nil {
-		defer existingF.Close()
-
-		existingHeaderBytes := [OBJECT_HEADER_SIZE]byte{}
-		_, err := existingF.ReadAt(existingHeaderBytes[:], 0)
-		if err != nil {
-			internalError(w, "io error reading %q: %s", objPath, err)
-			return
-		}
-
-		existingHeader, ok := ObjHeaderFromBytes(existingHeaderBytes[:])
-		if !ok {
-			internalError(w, "io error reading header of %q", objPath)
-			return
-		}
-
-		if existingHeader.Tombstone || header.B3sum != existingHeader.B3sum {
-			w.WriteHeader(http.StatusConflict)
-			w.Write([]byte("conflicting put"))
-			return
-		}
-	}
-
 	// Do the fanout on the temporary object so the scrubber doesn't interfere.
-	err = fanoutObject(k, tmpF.Name(), fanoutOpts{
-		Tombstone: false,
-		DoCheck:   false,
+	err = fanoutObject(k, header, tmpF.Name(), fanoutOpts{
+		DoCheck: false,
 	})
 	if err != nil {
 		internalError(w, "unable to fanout %q: %s", k, err)
@@ -347,7 +297,7 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	k := url.QueryEscape(req.FormValue("key"))
+	k := req.FormValue("key")
 	if k == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -386,9 +336,8 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Do the fanout on the temporary object so the scrubber doesn't interfere.
-	err = fanoutObject(k, tmpF.Name(), fanoutOpts{
-		Tombstone: true,
-		DoCheck:   false,
+	err = fanoutObject(k, objHeader, tmpF.Name(), fanoutOpts{
+		DoCheck: false,
 	})
 	if err != nil {
 		internalError(w, "unable to fanout %q: %s", k, err)
@@ -426,44 +375,27 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	k := url.QueryEscape(req.FormValue("key"))
+	k := req.FormValue("key")
 	if k == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	locs, err := GetClusterConfig().Crush(k)
-	if err != nil {
-		internalError(w, "error placing %q: %s", k, err)
-		return
-	}
-	primaryLoc := locs[0]
-	isPrimary := primaryLoc.Equals(ThisLocation)
-
-	if !isPrimary {
-		misdirected := true
-		for i := 1; i < len(locs); i++ {
-			if locs[i].Equals(ThisLocation) {
-				misdirected = false
-				break
-			}
-		}
-		if misdirected {
-			log.Printf("misdirected replication triggering config reload")
-			_, err := ReloadClusterConfig()
-			if err != nil {
-				internalError(w, "error reloading config: %s", err)
-				return
-			}
-			w.WriteHeader(http.StatusMisdirectedRequest)
+	if GetClusterConfig().ConfigId != req.FormValue("cid") {
+		log.Printf("misdirected replication triggering config check")
+		_, err := ReloadClusterConfig()
+		if err != nil {
+			internalError(w, "error reloading config: %s", err)
 			return
 		}
+		w.WriteHeader(http.StatusMisdirectedRequest)
+		return
 	}
 
 	objPath := ObjectPathFromKey(k)
 	objDir := filepath.Dir(objPath)
 
-	err = req.ParseMultipartForm(1024 * 1024)
+	err := req.ParseMultipartForm(1024 * 1024)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		io.WriteString(w, fmt.Sprintf("unable to read upload: %s", err))
@@ -511,10 +443,6 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 	if !ok {
 		w.WriteHeader(http.StatusBadRequest)
 		io.WriteString(w, "bad header checksum")
-		return
-	}
-
-	if header.IsExpired(time.Now(), TOMBSTONE_EXPIRY) {
 		return
 	}
 
@@ -569,22 +497,20 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		// Only accept the put if it is a delete or reupload of the existing data.
-		if !header.Tombstone && header.B3sum != existingHeader.B3sum {
-			w.WriteHeader(http.StatusConflict)
-			w.Write([]byte("conflicting replication"))
+		if existingHeader.After(&header) {
+			// We got the object, but the existing one is newer.
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		// Fallthrough, we must check + replicate for safety.
+		// Fallthrough.
 	}
 
 	if req.FormValue("fanout") == "true" {
 		// Do the fanout on the temporary object so the scrubber doesn't interfere.
-		err = fanoutObject(k, tmpF.Name(),
+		err = fanoutObject(k, header, tmpF.Name(),
 			fanoutOpts{
-				Tombstone: header.Tombstone,
-				DoCheck:   true,
+				DoCheck: true,
 			})
 		if err != nil {
 			internalError(w, "unable to fanout %q: %s", k, err)
@@ -617,23 +543,21 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 type fanoutOpts struct {
-	Tombstone bool
-	DoCheck   bool
+	DoCheck bool
 }
 
-func fanoutObject(k string, objPath string, opts fanoutOpts) error {
+func fanoutObject(k string, header ObjHeader, objPath string, opts fanoutOpts) error {
 
 	wg := &sync.WaitGroup{}
 	successfulReplications := uint64(0)
 	misdirectedErrors := uint64(0)
-	conflictErrors := uint64(0)
 
 	for {
 		successfulReplications = 0
 		misdirectedErrors = 0
-		conflictErrors = 0
 
-		locs, err := GetClusterConfig().Crush(k)
+		clusterConfig := GetClusterConfig()
+		locs, err := clusterConfig.Crush(k)
 		if err != nil {
 			return fmt.Errorf("error placing %q: %s", k, err)
 		}
@@ -652,7 +576,7 @@ func fanoutObject(k string, objPath string, opts fanoutOpts) error {
 				server := loc[len(loc)-1]
 
 				if opts.DoCheck {
-					meta, ok, err := CheckObj(server, k)
+					existingHeader, ok, err := CheckObj(clusterConfig, server, k)
 					if err != nil {
 						log.Printf("error checking %q on %s: %s", k, server, err)
 						if err == ErrMisdirectedRequest {
@@ -660,7 +584,7 @@ func fanoutObject(k string, objPath string, opts fanoutOpts) error {
 						}
 						return
 					}
-					if ok && opts.Tombstone == meta.Tombstone {
+					if ok && !header.After(&existingHeader) {
 						atomic.AddUint64(&successfulReplications, 1)
 						return
 					}
@@ -673,7 +597,7 @@ func fanoutObject(k string, objPath string, opts fanoutOpts) error {
 				}
 				defer objF.Close()
 				log.Printf("replicating %q to %s", k, server)
-				err = ReplicateObj(server, k, objF, ReplicateOpts{})
+				err = ReplicateObj(clusterConfig, server, k, objF, ReplicateOpts{})
 				if err != nil {
 					log.Printf("error replicating %q to %s: %s", k, server, err)
 					if err == ErrMisdirectedRequest {
@@ -688,12 +612,8 @@ func fanoutObject(k string, objPath string, opts fanoutOpts) error {
 
 		wg.Wait()
 
-		if conflictErrors != 0 {
-			return ErrReplicationConflict
-		}
-
 		if misdirectedErrors != 0 {
-			log.Printf("misdirected fanout triggering config reload")
+			log.Printf("misdirected fanout triggering config check")
 			// We tried to replicate to a server that did not want the object,
 			// one of the two has an out of date cluster layout.
 			_, err = ReloadClusterConfig()

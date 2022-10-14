@@ -30,14 +30,7 @@ const (
 	OBJECT_HEADER_SIZE = 52
 )
 
-type ObjMeta struct {
-	Size               uint64
-	Tombstone          bool
-	CreatedAtUnixMicro uint64
-}
-
 type ObjHeader struct {
-	Checksum           uint32
 	Tombstone          bool
 	CreatedAtUnixMicro uint64
 	Size               uint64
@@ -51,6 +44,26 @@ func ObjHeaderFromBytes(b []byte) (ObjHeader, bool) {
 	stamp := ObjHeader{}
 	ok := stamp.FieldsFromBytes(b)
 	return stamp, ok
+}
+
+func (h *ObjHeader) After(o *ObjHeader) bool {
+	if h.CreatedAtUnixMicro > o.CreatedAtUnixMicro {
+		return true
+	} else if h.CreatedAtUnixMicro < o.CreatedAtUnixMicro {
+		return false
+	} else {
+		// Tombstone has priority.
+		if h.Tombstone != o.Tombstone {
+			return h.Tombstone
+		}
+		// Resolve the conflict arbitrarily by the hash.
+		switch bytes.Compare(h.B3sum[:], o.B3sum[:]) {
+		case 0, 1:
+			return false
+		default:
+			return true
+		}
+	}
 }
 
 func (h *ObjHeader) IsExpired(now time.Time, timeout time.Duration) bool {
@@ -87,7 +100,7 @@ func (h *ObjHeader) ToBytes() [OBJECT_HEADER_SIZE]byte {
 
 type ObjectIterEntry struct {
 	Key string
-	ObjMeta
+	ObjHeader
 }
 
 type ObjectIter struct {
@@ -167,12 +180,8 @@ func (it *ObjectIter) Next() (ObjectIterEntry, bool, error) {
 				continue
 			}
 			it.buffer = append(it.buffer, ObjectIterEntry{
-				Key: key,
-				ObjMeta: ObjMeta{
-					Tombstone:          hdr.Tombstone,
-					CreatedAtUnixMicro: hdr.CreatedAtUnixMicro,
-					Size:               hdr.Size,
-				},
+				Key:       key,
+				ObjHeader: hdr,
 			})
 		}
 	}

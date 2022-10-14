@@ -3,6 +3,7 @@ package clusterconfig
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
@@ -13,9 +14,11 @@ import (
 	"github.com/andrewchambers/crushstore/crush"
 	"github.com/google/shlex"
 	"gopkg.in/yaml.v3"
+	"lukechampine.com/blake3"
 )
 
 type ClusterConfig struct {
+	ConfigId         string
 	ConfigBytes      []byte
 	ClusterSecret    string
 	PlacementRules   []crush.CrushSelection
@@ -28,7 +31,10 @@ func (cfg *ClusterConfig) Crush(k string) ([]crush.Location, error) {
 
 func ParseClusterConfig(configYamlBytes []byte) (*ClusterConfig, error) {
 
+	configHash := blake3.Sum256(configYamlBytes)
+
 	newConfig := &ClusterConfig{
+		ConfigId:    hex.EncodeToString(configHash[:]),
 		ConfigBytes: configYamlBytes,
 	}
 

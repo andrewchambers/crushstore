@@ -28,10 +28,9 @@ Like a hash table, it supports the following operations:
 
 Unlike a hash table, CrushStore has an additional constraint:
 
-Each key can only ever have a single unique value associated with it, for example each key
-could be a uuid that you should never reuse for different data.
-This restriction simplifies the system as there are never any conflicting values during
-distributed replication.
+Writes to a key are eventually consistent - upload conflicts are resolved by the create timestamp
+and reading from a different server you just wrote to may return a different value is
+the correct value has not been replicated.
 
 # Getting started
 

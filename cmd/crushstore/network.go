@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 
+	"github.com/andrewchambers/crushstore/clusterconfig"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -20,27 +21,26 @@ type ReplicateOpts struct {
 	Fanout bool
 }
 
-func ReplicateObj(server string, k string, f *os.File, opts ReplicateOpts) error {
-	return TheNetwork.ReplicateObj(server, k, f, opts)
+func ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+	return TheNetwork.ReplicateObj(cfg, server, k, f, opts)
 }
-func CheckObj(server string, k string) (ObjMeta, bool, error) {
-	return TheNetwork.CheckObj(server, k)
+func CheckObj(cfg *clusterconfig.ClusterConfig, server string, k string) (ObjHeader, bool, error) {
+	return TheNetwork.CheckObj(cfg, server, k)
 }
 
 // Represents the connection to outside nodes.
 type Network interface {
-	ReplicateObj(server string, k string, f *os.File, opts ReplicateOpts) error
-	CheckObj(server string, k string) (ObjMeta, bool, error)
+	ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error
+	CheckObj(cfg *clusterconfig.ClusterConfig, server string, k string) (ObjHeader, bool, error)
 }
 
 type realNetwork struct{}
 
 var (
-	ErrMisdirectedRequest  error = errors.New("misdirected request")
-	ErrReplicationConflict error = errors.New("replication conflict")
+	ErrMisdirectedRequest error = errors.New("misdirected request")
 )
 
-func (network *realNetwork) ReplicateObj(server string, k string, f *os.File, opts ReplicateOpts) error {
+func (network *realNetwork) ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
 
 	_, err := f.Seek(0, io.SeekStart)
 	if err != nil {
@@ -72,7 +72,7 @@ func (network *realNetwork) ReplicateObj(server string, k string, f *os.File, op
 		_ = errg.Wait()
 	}()
 
-	endpoint := fmt.Sprintf("%s/replicate?key=%s&fanout=%t", server, url.QueryEscape(k), opts.Fanout)
+	endpoint := fmt.Sprintf("%s/replicate?cid=%s&key=%s&fanout=%t", server, cfg.ConfigId, url.QueryEscape(k), opts.Fanout)
 	resp, err := http.Post(endpoint, mpw.FormDataContentType(), r)
 	if err != nil {
 		return err
@@ -87,10 +87,6 @@ func (network *realNetwork) ReplicateObj(server string, k string, f *os.File, op
 		return ErrMisdirectedRequest
 	}
 
-	if resp.StatusCode == http.StatusConflict {
-		return ErrReplicationConflict
-	}
-
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("replication of %q to %s failed: %s, body=%q", k, endpoint, resp.Status, body)
 	}
@@ -103,44 +99,44 @@ func (network *realNetwork) ReplicateObj(server string, k string, f *os.File, op
 	return nil
 }
 
-func (network *realNetwork) CheckObj(server string, k string) (ObjMeta, bool, error) {
-	endpoint := fmt.Sprintf("%s/check?key=%s", server, url.QueryEscape(k))
+func (network *realNetwork) CheckObj(cfg *clusterconfig.ClusterConfig, server string, k string) (ObjHeader, bool, error) {
+	endpoint := fmt.Sprintf("%s/check?cid=%s&key=%s", server, cfg.ConfigId, url.QueryEscape(k))
 	resp, err := http.Get(endpoint)
 	if err != nil {
-		return ObjMeta{}, false, fmt.Errorf("unable to check %q@%s: %w", k, server, err)
+		return ObjHeader{}, false, fmt.Errorf("unable to check %q@%s: %w", k, server, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return ObjMeta{}, false, fmt.Errorf("unable to read check body for %q@%s: %w", k, server, err)
+		return ObjHeader{}, false, fmt.Errorf("unable to read check body for %q@%s: %w", k, server, err)
 	}
 
 	if resp.StatusCode == http.StatusNotFound {
-		return ObjMeta{}, false, nil
+		return ObjHeader{}, false, nil
 	}
 
 	if resp.StatusCode == http.StatusMisdirectedRequest {
-		return ObjMeta{}, false, ErrMisdirectedRequest
+		return ObjHeader{}, false, ErrMisdirectedRequest
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return ObjMeta{}, false, fmt.Errorf("unable to check %q@%s: %s", k, server, resp.Status)
+		return ObjHeader{}, false, fmt.Errorf("unable to check %q@%s: %s", k, server, resp.Status)
 	}
 
-	stat := ObjMeta{}
+	stat := ObjHeader{}
 	err = json.Unmarshal(body, &stat)
 	return stat, true, err
 }
 
 type MockNetwork struct {
-	ReplicateFunc func(server string, k string, f *os.File, opts ReplicateOpts) error
-	CheckFunc     func(server string, k string) (ObjMeta, bool, error)
+	ReplicateFunc func(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error
+	CheckFunc     func(cfg *clusterconfig.ClusterConfig, server string, k string) (ObjHeader, bool, error)
 }
 
-func (network *MockNetwork) ReplicateObj(server string, k string, f *os.File, opts ReplicateOpts) error {
-	return network.ReplicateFunc(server, k, f, opts)
+func (network *MockNetwork) ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+	return network.ReplicateFunc(cfg, server, k, f, opts)
 }
 
-func (network *MockNetwork) CheckObj(server string, k string) (ObjMeta, bool, error) {
-	return network.CheckFunc(server, k)
+func (network *MockNetwork) CheckObj(cfg *clusterconfig.ClusterConfig, server string, k string) (ObjHeader, bool, error) {
+	return network.CheckFunc(cfg, server, k)
 }

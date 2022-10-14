@@ -21,7 +21,7 @@ import (
 )
 
 var (
-	_scrubTrigger                    chan struct{} = make(chan struct{})
+	_scrubTrigger                    chan struct{} = make(chan struct{}, 1)
 	_totalScrubbedBytes              uint64
 	_totalScrubbedObjects            uint64
 	_totalScrubCorruptionErrorCount  uint64
@@ -142,7 +142,7 @@ rebalanceAgain:
 	if clusterConfig == nil {
 		clusterConfig = GetClusterConfig()
 	} else {
-		log.Printf("misdirected scrub replication triggering config reload")
+		log.Printf("misdirected scrub replication triggering config check")
 		newConfig, err := ReloadClusterConfig()
 		if err != nil {
 			logScrubError(SCRUB_EOTHER, "scrubber unable to reload config: %s", err)
@@ -161,7 +161,7 @@ rebalanceAgain:
 	if ThisLocation.Equals(primaryLoc) {
 		for i := 1; i < len(locs); i++ {
 			server := locs[i][len(locs[i])-1]
-			meta, ok, err := CheckObj(server, k)
+			existingHeader, ok, err := CheckObj(clusterConfig, server, k)
 			if err != nil {
 				if err == ErrMisdirectedRequest {
 					goto rebalanceAgain
@@ -169,21 +169,9 @@ rebalanceAgain:
 				logScrubError(SCRUB_EREPL, "scrubber check failed: %s", err)
 				continue
 			}
-			if ok {
-				if header.Tombstone && !meta.Tombstone {
-					// Both have the data, but they disagree about the deletion state.
-					log.Printf("scrubber replicating tombstone of %q to %s", k, server)
-					err := ReplicateObj(server, k, objF, ReplicateOpts{})
-					if err != nil {
-						if err == ErrMisdirectedRequest {
-							goto rebalanceAgain
-						}
-						logScrubError(SCRUB_EREPL, "scrubber replication of %q failed: %s", k, err)
-					}
-				}
-			} else {
+			if !ok || header.After(&existingHeader) {
 				log.Printf("scrubber replicating %q to %s", k, server)
-				err := ReplicateObj(server, k, objF, ReplicateOpts{})
+				err := ReplicateObj(clusterConfig, server, k, objF, ReplicateOpts{})
 				if err != nil {
 					if err == ErrMisdirectedRequest {
 						goto rebalanceAgain
@@ -194,7 +182,7 @@ rebalanceAgain:
 		}
 	} else {
 		primaryServer := primaryLoc[len(primaryLoc)-1]
-		_, ok, err := CheckObj(primaryServer, k)
+		existingHeader, ok, err := CheckObj(clusterConfig, primaryServer, k)
 		if err != nil {
 			if err == ErrMisdirectedRequest {
 				goto rebalanceAgain
@@ -202,13 +190,9 @@ rebalanceAgain:
 			logScrubError(SCRUB_EREPL, "scrubber was unable to verify primary placement of %q: %s", k, err)
 			return
 		}
-		if !ok {
-			if !ok {
-				log.Printf("restoring %q to primary server %s", k, primaryServer)
-			} else {
-				log.Printf("scrubber replicating tombstone of %q to %s", k, primaryServer)
-			}
-			err := ReplicateObj(primaryServer, k, objF, ReplicateOpts{Fanout: true})
+		if !ok || header.After(&existingHeader) {
+			log.Printf("restoring %q to primary server %s", k, primaryServer)
+			err := ReplicateObj(clusterConfig, primaryServer, k, objF, ReplicateOpts{Fanout: true})
 			if err != nil {
 				if err == ErrMisdirectedRequest {
 					goto rebalanceAgain
@@ -383,14 +367,12 @@ func ScrubForever() {
 		}
 
 		for doScrub {
-			startCfg := GetClusterConfig()
 			Scrub(ScrubOpts{Full: full}) // XXX config full and not.
-			endCfg := GetClusterConfig()
 			full = false
-			if startCfg == endCfg && !LastScrubHadErrors() {
-				doScrub = false
-			} else {
+			if LastScrubHadErrors() {
 				time.Sleep(1 * time.Second)
+			} else {
+				doScrub = false
 			}
 		}
 
