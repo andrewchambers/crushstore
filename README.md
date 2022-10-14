@@ -46,6 +46,7 @@ $ ls ./bin
 crushstore
 crushstore-delete
 crushstore-get
+crushstore-head
 crushstore-list
 crushstore-list-keys
 crushstore-put

@@ -58,9 +58,11 @@ func main() {
 
 	http.HandleFunc("/put", putHandler)
 	http.HandleFunc("/get", getHandler)
+	http.HandleFunc("/head", headHandler)
 	http.HandleFunc("/delete", deleteHandler)
 	http.HandleFunc("/iter_begin", iterBeginHandler)
 	http.HandleFunc("/iter_next", iterNextHandler)
+	// cluster internal end points.
 	http.HandleFunc("/replicate", replicateHandler)
 	http.HandleFunc("/check", checkHandler)
 

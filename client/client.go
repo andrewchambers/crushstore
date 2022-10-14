@@ -191,11 +191,6 @@ func (c *Client) Get(k string, into io.Writer, opts GetOptions) (bool, error) {
 		err := c.get(server, k, into, opts)
 		if err != nil {
 			if err, ok := err.(*ClientRequestError); ok {
-				/*
-					if err.StatusCode == http.StatusMisdirectedRequest {
-						// XXX Reload client config here and try again?
-					}
-				*/
 				if err.StatusCode == http.StatusNotFound {
 					continue
 				}
@@ -215,6 +210,75 @@ func (c *Client) Get(k string, into io.Writer, opts GetOptions) (bool, error) {
 		return false, errs[0]
 	default:
 		return false, &MultiError{Errors: errs}
+	}
+}
+
+type ObjectHeader struct {
+	CreatedAtUnixMicro uint64
+	Size               uint64
+	B3sum              [32]byte
+}
+
+func (c *Client) head(server string, k string, opts HeadOptions) (ObjectHeader, error) {
+	endpoint := fmt.Sprintf("%s/head?key=%s", server, url.QueryEscape(k))
+	resp, err := c.http.Get(endpoint)
+	if err != nil {
+		return ObjectHeader{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ObjectHeader{}, responseError(server, resp)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ObjectHeader{}, err
+	}
+
+	header := ObjectHeader{}
+	err = json.Unmarshal(body, &header)
+	if err != nil {
+		return ObjectHeader{}, err
+	}
+
+	return header, nil
+}
+
+type HeadOptions struct{}
+
+func (c *Client) Head(k string, opts HeadOptions) (ObjectHeader, bool, error) {
+
+	locs, err := c.GetClusterConfig().Crush(k)
+	if err != nil {
+		return ObjectHeader{}, false, err
+	}
+
+	errs := []error{}
+	for _, loc := range locs {
+		server := loc[len(loc)-1]
+		header, err := c.head(server, k, opts)
+		if err != nil {
+			if err, ok := err.(*ClientRequestError); ok {
+				if err.StatusCode == http.StatusNotFound {
+					continue
+				}
+				if err.StatusCode == http.StatusGone {
+					return ObjectHeader{}, false, nil
+				}
+			}
+			errs = append(errs, err)
+			break
+		}
+		return header, true, nil
+	}
+	switch len(errs) {
+	case 0:
+		return ObjectHeader{}, false, nil
+	case 1:
+		return ObjectHeader{}, false, errs[0]
+	default:
+		return ObjectHeader{}, false, &MultiError{Errors: errs}
 	}
 }
 
@@ -292,7 +356,7 @@ func (c *Client) iterNext(server string, cursor string, iterOut interface{}) err
 	return nil
 }
 
-type RemoteObjectMetadata struct {
+type RemoteObject struct {
 	Server    string
 	Key       string
 	Size      uint64
@@ -301,9 +365,10 @@ type RemoteObjectMetadata struct {
 }
 
 type ListOptions struct {
+	ListDeleted bool
 }
 
-func (c *Client) List(cb func(RemoteObjectMetadata) bool, opts ListOptions) error {
+func (c *Client) List(cb func(RemoteObject) bool, opts ListOptions) error {
 	cfg := c.GetClusterConfig()
 	for _, node := range cfg.StorageHierarchy.StorageNodes {
 		if node.IsDefunct() {
@@ -329,7 +394,10 @@ func (c *Client) List(cb func(RemoteObjectMetadata) bool, opts ListOptions) erro
 				break
 			}
 			for _, o := range objects {
-				cont := cb(RemoteObjectMetadata{
+				if o.Tombstone && !opts.ListDeleted {
+					continue
+				}
+				cont := cb(RemoteObject{
 					Server:    server,
 					Key:       o.Key,
 					Size:      o.Size,

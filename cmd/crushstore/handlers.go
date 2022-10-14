@@ -27,61 +27,6 @@ func internalError(w http.ResponseWriter, format string, a ...interface{}) {
 	w.Write([]byte("internal server error"))
 }
 
-func checkHandler(w http.ResponseWriter, req *http.Request) {
-	if req.Method != "GET" {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	q := req.URL.Query()
-	k := q.Get("key")
-	if k == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	if GetClusterConfig().ConfigId != q.Get("cid") {
-		log.Printf("misdirected check triggering config check")
-		_, err := ReloadClusterConfig()
-		if err != nil {
-			internalError(w, "error reloading config: %s", err)
-			return
-		}
-		w.WriteHeader(http.StatusMisdirectedRequest)
-		return
-	}
-
-	objPath := ObjectPathFromKey(k)
-	f, err := os.Open(objPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		internalError(w, "io error opening %q: %s", objPath, err)
-		return
-	}
-	defer f.Close()
-	headerBytes := [OBJECT_HEADER_SIZE]byte{}
-	_, err = io.ReadFull(f, headerBytes[:])
-	if err != nil {
-		internalError(w, "io error reading %q: %s", objPath, err)
-		return
-	}
-	header, ok := ObjHeaderFromBytes(headerBytes[:])
-	if !ok {
-		log.Printf("WARNING: corrupt object header at %q", objPath)
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-	buf, err := json.Marshal(&header)
-	if err != nil {
-		internalError(w, "error marshalling response: %s", err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(buf)
-}
-
 type objectContentReadSeeker struct {
 	f *os.File
 }
@@ -104,17 +49,6 @@ func (of *objectContentReadSeeker) Seek(offset int64, whence int) (int64, error)
 	default:
 		panic("bad whence")
 	}
-}
-
-func flushDir(dirPath string) error {
-	// XXX possible cache opens?
-	d, err := os.Open(dirPath)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	// XXX possible to batch syncs across goroutines?
-	return d.Sync()
 }
 
 func getHandler(w http.ResponseWriter, req *http.Request) {
@@ -149,7 +83,6 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 				randomLoc := locs[mathrand.Int()%len(locs)]
 				randomServer := randomLoc[len(randomLoc)-1]
 				redirect := fmt.Sprintf("%s/get?key=%s", randomServer, url.QueryEscape(k))
-				w.WriteHeader(http.StatusMisdirectedRequest)
 				http.Redirect(w, req, redirect, http.StatusSeeOther)
 				return
 			} else {
@@ -176,7 +109,7 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if header.Tombstone {
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusGone)
 		return
 	}
 
@@ -184,6 +117,96 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", header.Size))
 	modTime := time.UnixMicro(int64(header.CreatedAtUnixMicro))
 	http.ServeContent(w, req, k, modTime, &objectContentReadSeeker{f})
+}
+
+func headHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "GET" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	q := req.URL.Query()
+	k := q.Get("key")
+	if k == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	objPath := ObjectPathFromKey(k)
+	f, err := os.Open(objPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			locs, err := GetClusterConfig().Crush(k)
+			if err != nil {
+				internalError(w, "error placing %q: %s", k, err)
+				return
+			}
+			misdirected := true
+			for i := 0; i < len(locs); i++ {
+				if locs[i].Equals(ThisLocation) {
+					misdirected = false
+					break
+				}
+			}
+			if misdirected {
+				// For get requests we can just redirect to another server.
+				randomLoc := locs[mathrand.Int()%len(locs)]
+				randomServer := randomLoc[len(randomLoc)-1]
+				redirect := fmt.Sprintf("%s/head?key=%s", randomServer, url.QueryEscape(k))
+				http.Redirect(w, req, redirect, http.StatusSeeOther)
+				return
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+		}
+		internalError(w, "io error opening %q: %s", objPath, err)
+		return
+	}
+	defer f.Close()
+
+	headerBytes := [OBJECT_HEADER_SIZE]byte{}
+	_, err = io.ReadFull(f, headerBytes[:])
+	if err != nil {
+		internalError(w, "io error reading %q: %s", objPath, err)
+		return
+	}
+	header, ok := ObjHeaderFromBytes(headerBytes[:])
+	if !ok {
+		log.Printf("WARNING: corrupt object header at %q", objPath)
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	if header.Tombstone {
+		w.WriteHeader(http.StatusGone)
+		return
+	}
+
+	buf, err := json.Marshal(&struct {
+		CreatedAtUnixMicro uint64
+		Size               uint64
+		B3sum              [32]byte
+	}{
+		CreatedAtUnixMicro: header.CreatedAtUnixMicro,
+		Size:               header.Size,
+		B3sum:              header.B3sum,
+	})
+	if err != nil {
+		internalError(w, "error marshalling response: %s", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(buf)
+}
+
+func flushDir(dirPath string) error {
+	// XXX possible cache opens?
+	d, err := os.Open(dirPath)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	// XXX possible to batch syncs across goroutines?
+	return d.Sync()
 }
 
 func putHandler(w http.ResponseWriter, req *http.Request) {
@@ -367,6 +390,61 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 		internalError(w, "io error flushing: %s", err)
 	}
 
+}
+
+func checkHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "GET" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	q := req.URL.Query()
+	k := q.Get("key")
+	if k == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	if GetClusterConfig().ConfigId != q.Get("cid") {
+		log.Printf("misdirected check triggering config check")
+		_, err := ReloadClusterConfig()
+		if err != nil {
+			internalError(w, "error reloading config: %s", err)
+			return
+		}
+		w.WriteHeader(http.StatusMisdirectedRequest)
+		return
+	}
+
+	objPath := ObjectPathFromKey(k)
+	f, err := os.Open(objPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		internalError(w, "io error opening %q: %s", objPath, err)
+		return
+	}
+	defer f.Close()
+	headerBytes := [OBJECT_HEADER_SIZE]byte{}
+	_, err = io.ReadFull(f, headerBytes[:])
+	if err != nil {
+		internalError(w, "io error reading %q: %s", objPath, err)
+		return
+	}
+	header, ok := ObjHeaderFromBytes(headerBytes[:])
+	if !ok {
+		log.Printf("WARNING: corrupt object header at %q", objPath)
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	buf, err := json.Marshal(&header)
+	if err != nil {
+		internalError(w, "error marshalling response: %s", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(buf)
 }
 
 func replicateHandler(w http.ResponseWriter, req *http.Request) {

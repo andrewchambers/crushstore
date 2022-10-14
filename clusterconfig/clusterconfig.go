@@ -34,7 +34,7 @@ func ParseClusterConfig(configYamlBytes []byte) (*ClusterConfig, error) {
 	configHash := blake3.Sum256(configYamlBytes)
 
 	newConfig := &ClusterConfig{
-		ConfigId:    hex.EncodeToString(configHash[:]),
+		ConfigId:    hex.EncodeToString(configHash[:16]),
 		ConfigBytes: configYamlBytes,
 	}
 

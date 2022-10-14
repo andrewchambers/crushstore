@@ -175,7 +175,7 @@ func TestDelete(t *testing.T) {
 	req = mockGetRequest(t, "key="+k)
 	rr = httptest.NewRecorder()
 	getHandler(rr, req)
-	if rr.Code != http.StatusNotFound {
+	if rr.Code != http.StatusGone {
 		t.Fatalf("get request not as expected: %d", rr.Code)
 	}
 
@@ -318,7 +318,7 @@ func TestReplicateWithFanout(t *testing.T) {
 	req = mockGetRequest(t, "key="+k)
 	rr = httptest.NewRecorder()
 	getHandler(rr, req)
-	if rr.Code != http.StatusNotFound {
+	if rr.Code != http.StatusGone {
 		t.Fatalf("get request failed: %d", rr.Code)
 	}
 }
