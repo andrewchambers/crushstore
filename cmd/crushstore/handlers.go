@@ -10,6 +10,8 @@ import (
 	"io/fs"
 	"log"
 	mathrand "math/rand"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -260,6 +262,118 @@ func flushDir(dirPath string) error {
 	return d.Sync()
 }
 
+type objectForm struct {
+	Key           string
+	ObjectPath    string
+	ObjectDir     string
+	TmpObjectFile *os.File
+	QueryFields   url.Values
+	Fields        map[string]string
+}
+
+func (form *objectForm) FormValue(s string) string {
+	v, ok := form.Fields[s]
+	if ok {
+		return v
+	}
+	return form.QueryFields.Get(s)
+}
+
+func (form *objectForm) Cleanup() {
+	if form.TmpObjectFile != nil {
+		err := os.Remove(form.TmpObjectFile.Name())
+		if err != nil {
+			log.Printf("error cleaning up %q: %s", form.TmpObjectFile.Name(), err)
+		}
+		_ = form.TmpObjectFile.Close()
+	}
+}
+
+// Our own version because the stdlib doesn't let us read directly into the object directory without a copy.
+func readObjectForm(req *http.Request) (*objectForm, bool, error) {
+
+	query := req.URL.Query()
+	parsed := &objectForm{
+		QueryFields: query,
+		Fields:      make(map[string]string),
+	}
+
+	cleanupForm := true
+	defer func() {
+		if cleanupForm {
+			parsed.Cleanup()
+		}
+	}()
+
+	contentType := req.Header.Get("Content-Type")
+	if contentType == "" {
+		return nil, false, nil
+	}
+	d, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, false, nil
+	}
+	if d != "multipart/form-data" {
+		return nil, false, nil
+	}
+	boundary, ok := params["boundary"]
+	if !ok {
+		return nil, false, nil
+	}
+
+	r := multipart.NewReader(req.Body, boundary)
+	for {
+		p, err := r.NextPart()
+		if err != nil {
+			if err == io.EOF {
+				cleanupForm = false
+				return parsed, true, nil
+			}
+			return nil, false, err
+		}
+		name := p.FormName()
+		fileName := p.FileName()
+		if fileName != "" {
+			if fileName != "data" || parsed.TmpObjectFile != nil {
+				return nil, false, nil
+			}
+
+			key := parsed.FormValue("key")
+			if key == "" {
+				return nil, false, nil
+			}
+
+			parsed.Key = key
+			parsed.ObjectPath = ObjectPathFromKey(key)
+			parsed.ObjectDir = filepath.Dir(parsed.ObjectPath)
+
+			tmpF, err := os.CreateTemp(parsed.ObjectDir, "*$tmp")
+			if err != nil {
+				return nil, false, err
+			}
+			parsed.TmpObjectFile = tmpF
+
+			_, err = io.Copy(tmpF, p)
+			if err != nil {
+				return nil, false, err
+			}
+
+			_, err = tmpF.Seek(0, io.SeekStart)
+			if err != nil {
+				return nil, false, err
+			}
+
+		} else {
+			valueBytes, err := io.ReadAll(p)
+			if err != nil {
+				return nil, false, err
+			}
+			value := string(valueBytes)
+			parsed.Fields[name] = value
+		}
+	}
+}
+
 func putHandler(w http.ResponseWriter, req *http.Request) {
 	if !AuthorizedRequest(req) {
 		w.WriteHeader(http.StatusForbidden)
@@ -271,45 +385,27 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	k := req.FormValue("key")
+	objForm, ok, err := readObjectForm(req)
+	if err != nil {
+		internalError(w, "io error reading post: %s", err)
+		return
+	}
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, "bad upload")
+		return
+	}
+	defer objForm.Cleanup()
+
+	k := objForm.Key
 	if k == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-
-	objPath := ObjectPathFromKey(k)
-	objDir := filepath.Dir(objPath)
-
-	err := req.ParseMultipartForm(1024 * 1024)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, fmt.Sprintf("unable to read upload: %s", err))
-		return
-	}
-
-	dataFile, _, err := req.FormFile("data")
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("missing data field"))
-		return
-	}
-	defer dataFile.Close()
-
-	tmpF, err := os.CreateTemp(objDir, "obj*$tmp")
-	if err != nil {
-		internalError(w, "io error creating temporary file: %s", err)
-		return
-	}
-
-	removeTmp := true
-	defer func() {
-		if removeTmp {
-			err := os.Remove(tmpF.Name())
-			if err != nil {
-				log.Printf("io error removing %q: %s", tmpF.Name(), err)
-			}
-		}
-	}()
+	nReplicas, _ := strconv.Atoi(objForm.FormValue("replicas"))
+	objPath := objForm.ObjectPath
+	objDir := objForm.ObjectDir
+	tmpF := objForm.TmpObjectFile
 
 	header := ObjHeader{}
 	header.Tombstone = false
@@ -322,7 +418,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	hasher := blake3.New(32, nil)
-	size, err := io.Copy(io.MultiWriter(tmpF, hasher), dataFile)
+	size, err := io.Copy(hasher, tmpF)
 	if err != nil {
 		internalError(w, "io error writing %q: %s", tmpF.Name(), err)
 		return
@@ -335,8 +431,6 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		internalError(w, "io error writing %q: %s", tmpF.Name(), err)
 		return
 	}
-
-	nReplicas, _ := strconv.Atoi(req.FormValue("replicas"))
 
 	// Do the fanout on the temporary object so the scrubber doesn't interfere.
 	err = fanoutObject(k, header, tmpF.Name(), fanoutOpts{
@@ -364,7 +458,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		internalError(w, "io error renaming %q to %q: %s", tmpF.Name(), objPath, err)
 	}
-	removeTmp = false
+	objForm.TmpObjectFile = nil
 
 	err = flushDir(objDir)
 	if err != nil {
@@ -527,13 +621,30 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	k := req.FormValue("key")
+	objForm, ok, err := readObjectForm(req)
+	if err != nil {
+		internalError(w, "io error reading post: %s", err)
+		return
+	}
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, "bad upload")
+		return
+	}
+	defer objForm.Cleanup()
+
+	k := objForm.Key
 	if k == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	cid := objForm.FormValue("cid")
+	fanout := objForm.FormValue("fanout") == "true"
+	objPath := objForm.ObjectPath
+	objDir := objForm.ObjectDir
+	tmpF := objForm.TmpObjectFile
 
-	if GetClusterConfig().ConfigId != req.FormValue("cid") {
+	if GetClusterConfig().ConfigId != cid {
 		log.Printf("misdirected replication triggering config check")
 		_, err := ReloadClusterConfig()
 		if err != nil {
@@ -544,45 +655,11 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	objPath := ObjectPathFromKey(k)
-	objDir := filepath.Dir(objPath)
-
-	err := req.ParseMultipartForm(1024 * 1024)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, fmt.Sprintf("unable to read upload: %s", err))
-		return
-	}
-
-	dataFile, _, err := req.FormFile("data")
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("missing data field"))
-		return
-	}
-	defer dataFile.Close()
-
-	tmpF, err := os.CreateTemp(objDir, "obj*$tmp")
-	if err != nil {
-		internalError(w, "io error creating temporary file: %s", err)
-		return
-	}
-
-	removeTmp := true
-	defer func() {
-		if removeTmp {
-			err := os.Remove(tmpF.Name())
-			if err != nil {
-				log.Printf("io error removing %q", tmpF.Name())
-			}
-		}
-	}()
-
 	headerBytes := [OBJECT_HEADER_SIZE]byte{}
-	_, err = io.ReadFull(dataFile, headerBytes[:])
+	_, err = io.ReadFull(tmpF, headerBytes[:])
 	if err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) {
-			w.WriteHeader(400)
+			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte("unexpected EOF"))
 			return
 		} else {
@@ -598,14 +675,8 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	_, err = tmpF.Write(headerBytes[:])
-	if err != nil {
-		internalError(w, "io error writing %q: %s", tmpF.Name(), err)
-		return
-	}
-
 	hasher := blake3.New(32, nil)
-	size, err := io.Copy(io.MultiWriter(tmpF, hasher), dataFile)
+	size, err := io.Copy(hasher, tmpF)
 	if err != nil {
 		internalError(w, "io error writing %q: %s", tmpF.Name(), err)
 		return
@@ -613,7 +684,7 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 
 	if header.Size != uint64(size) {
 		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, "header size mismatch")
+		io.WriteString(w, fmt.Sprintf("object header size is %d but read %d bytes", header.Size, size))
 		return
 	}
 
@@ -658,7 +729,7 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 		// Fallthrough.
 	}
 
-	if req.FormValue("fanout") == "true" {
+	if fanout {
 		// Do the fanout on the temporary object so the scrubber doesn't interfere.
 		err = fanoutObject(k, header, tmpF.Name(),
 			fanoutOpts{
@@ -686,7 +757,7 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		internalError(w, "io error renaming %q to %q: %s", tmpF.Name(), objPath, err)
 	}
-	removeTmp = false
+	objForm.TmpObjectFile = nil
 
 	err = flushDir(objDir)
 	if err != nil {

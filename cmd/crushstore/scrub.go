@@ -279,6 +279,7 @@ func Scrub(opts ScrubOpts) {
 
 		log.Printf("scrubbed %d object(s), %d byte(s) with %d error(s)", scrubbedObjects, scrubbedBytes, scrubRecord.ErrorCount())
 		atomic.StoreUint64(&_scrubInProgress, 0)
+		atomic.AddUint64(&_scrubsCompleted, 1)
 	}()
 
 	dispatch := make(chan string)
@@ -335,8 +336,6 @@ func Scrub(opts ScrubOpts) {
 	if err != nil {
 		logScrubError(SCRUB_EOTHER, "scrub worker had an error: %s", err)
 	}
-
-	atomic.AddUint64(&_scrubsCompleted, 1)
 }
 
 func ScrubForever() {
@@ -368,6 +367,10 @@ func ScrubForever() {
 		if lastFullScrub.Add(FullScrubInterval).Before(now) {
 			doScrub = true
 			full = true
+		}
+		if atomic.LoadUint64(&_scrubsCompleted) == 0 {
+			// Always do a scrub initially.
+			doScrub = true
 		}
 
 		for doScrub {

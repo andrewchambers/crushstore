@@ -12,7 +12,6 @@ import (
 )
 
 var TestConfig = `
-cluster-secret: password
 storage-schema: host
 placement-rules:
     - select host 2
