@@ -56,7 +56,6 @@ crushstore-put
 
 Create a test config - crushstore-cluster.conf:
 ```
-cluster-secret: password
 storage-schema: host
 placement-rules:
     - select host 2

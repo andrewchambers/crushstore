@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/andrewchambers/crushstore/clusterconfig"
@@ -91,7 +92,54 @@ func responseError(server string, resp *http.Response) error {
 	}
 }
 
-func (c *Client) _put(server string, k string, data io.Reader, opts PutOptions) error {
+func (c *Client) setAuthHeaders(cfg *clusterconfig.ClusterConfig, req *http.Request) {
+	if cfg.ClusterSecret != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.ClusterSecret)
+	}
+}
+
+func (c *Client) httpGet(cfg *clusterconfig.ClusterConfig, endpoint string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuthHeaders(cfg, req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (c *Client) post(cfg *clusterconfig.ClusterConfig, endpoint, contentType string, r io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest("POST", endpoint, r)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	c.setAuthHeaders(cfg, req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (c *Client) postForm(cfg *clusterconfig.ClusterConfig, endpoint string, values url.Values) (*http.Response, error) {
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(values.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	c.setAuthHeaders(cfg, req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (c *Client) put(cfg *clusterconfig.ClusterConfig, server string, k string, data io.Reader, opts PutOptions) error {
 	r, w := io.Pipe()
 	mpw := multipart.NewWriter(w)
 	contentType := mpw.FormDataContentType()
@@ -124,7 +172,7 @@ func (c *Client) _put(server string, k string, data io.Reader, opts PutOptions) 
 	}
 
 	endpoint := fmt.Sprintf("%s/put?key=%s%s", server, url.QueryEscape(k), replicas)
-	resp, err := c.http.Post(endpoint, contentType, r)
+	resp, err := c.post(cfg, endpoint, contentType, r)
 	if err != nil {
 		return err
 	}
@@ -147,13 +195,14 @@ type PutOptions struct {
 }
 
 func (c *Client) Put(k string, data io.ReadSeeker, opts PutOptions) error {
-	locs, err := c.GetClusterConfig().Crush(k)
+	cfg := c.GetClusterConfig()
+	locs, err := cfg.Crush(k)
 	if err != nil {
 		return err
 	}
 	// Upload to the primary server.
 	server := locs[0][len(locs[0])-1]
-	err = c._put(server, k, data, opts)
+	err = c.put(cfg, server, k, data, opts)
 	if err != nil {
 		// XXX HA option to put to a different server, or with fewer required replications?
 		return err
@@ -161,24 +210,20 @@ func (c *Client) Put(k string, data io.ReadSeeker, opts PutOptions) error {
 	return nil
 }
 
-func (c *Client) get(server string, k string, into io.Writer, opts GetOptions) error {
-
+func (c *Client) get(cfg *clusterconfig.ClusterConfig, server string, k string, into io.Writer, opts GetOptions) error {
 	endpoint := fmt.Sprintf("%s/get?key=%s", server, url.QueryEscape(k))
-	resp, err := c.http.Get(endpoint)
+	resp, err := c.httpGet(cfg, endpoint)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		return responseError(server, resp)
 	}
-
 	_, err = io.Copy(into, resp.Body)
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 
@@ -186,7 +231,8 @@ type GetOptions struct{}
 
 func (c *Client) Get(k string, into io.Writer, opts GetOptions) (bool, error) {
 
-	locs, err := c.GetClusterConfig().Crush(k)
+	cfg := c.GetClusterConfig()
+	locs, err := cfg.Crush(k)
 	if err != nil {
 		return false, err
 	}
@@ -194,7 +240,7 @@ func (c *Client) Get(k string, into io.Writer, opts GetOptions) (bool, error) {
 	errs := []error{}
 	for _, loc := range locs {
 		server := loc[len(loc)-1]
-		err := c.get(server, k, into, opts)
+		err := c.get(cfg, server, k, into, opts)
 		if err != nil {
 			if err, ok := err.(*ClientRequestError); ok {
 				if err.StatusCode == http.StatusNotFound {
@@ -222,12 +268,12 @@ func (c *Client) Get(k string, into io.Writer, opts GetOptions) (bool, error) {
 type ObjectHeader struct {
 	CreatedAtUnixMicro uint64
 	Size               uint64
-	B3sum              [32]byte
+	B3sum              string
 }
 
-func (c *Client) head(server string, k string, opts HeadOptions) (ObjectHeader, error) {
+func (c *Client) head(cfg *clusterconfig.ClusterConfig, server string, k string, opts HeadOptions) (ObjectHeader, error) {
 	endpoint := fmt.Sprintf("%s/head?key=%s", server, url.QueryEscape(k))
-	resp, err := c.http.Get(endpoint)
+	resp, err := c.httpGet(cfg, endpoint)
 	if err != nil {
 		return ObjectHeader{}, err
 	}
@@ -255,7 +301,8 @@ type HeadOptions struct{}
 
 func (c *Client) Head(k string, opts HeadOptions) (ObjectHeader, bool, error) {
 
-	locs, err := c.GetClusterConfig().Crush(k)
+	cfg := c.GetClusterConfig()
+	locs, err := cfg.Crush(k)
 	if err != nil {
 		return ObjectHeader{}, false, err
 	}
@@ -263,7 +310,7 @@ func (c *Client) Head(k string, opts HeadOptions) (ObjectHeader, bool, error) {
 	errs := []error{}
 	for _, loc := range locs {
 		server := loc[len(loc)-1]
-		header, err := c.head(server, k, opts)
+		header, err := c.head(cfg, server, k, opts)
 		if err != nil {
 			if err, ok := err.(*ClientRequestError); ok {
 				if err.StatusCode == http.StatusNotFound {
@@ -288,9 +335,9 @@ func (c *Client) Head(k string, opts HeadOptions) (ObjectHeader, bool, error) {
 	}
 }
 
-func (c *Client) delete(server string, k string, opts DeleteOptions) error {
+func (c *Client) delete(cfg *clusterconfig.ClusterConfig, server string, k string, opts DeleteOptions) error {
 	endpoint := fmt.Sprintf("%s/delete?key=%s", server, url.QueryEscape(k))
-	resp, err := c.http.PostForm(endpoint, url.Values{})
+	resp, err := c.postForm(cfg, endpoint, url.Values{})
 	if err != nil {
 		return err
 	}
@@ -306,26 +353,28 @@ type DeleteOptions struct {
 }
 
 func (c *Client) Delete(k string, opts DeleteOptions) error {
-	locs, err := c.GetClusterConfig().Crush(k)
+	cfg := c.GetClusterConfig()
+	locs, err := cfg.Crush(k)
 	if err != nil {
 		return err
 	}
 	// Delete at the primary server.
 	server := locs[0][len(locs[0])-1]
-	err = c.delete(server, k, opts)
+	err = c.delete(cfg, server, k, opts)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (c *Client) iterBegin(server string, typ string) (string, error) {
+func (c *Client) iterBegin(cfg *clusterconfig.ClusterConfig, server string, typ string) (string, error) {
 	endpoint := fmt.Sprintf("%s/iter_begin?type=%s", server, url.QueryEscape(typ))
-	resp, err := c.http.PostForm(endpoint, url.Values{})
+	resp, err := c.postForm(cfg, endpoint, url.Values{})
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		return "", responseError(server, resp)
 	}
@@ -341,12 +390,9 @@ func (c *Client) iterBegin(server string, typ string) (string, error) {
 	return cursor, nil
 }
 
-func (c *Client) iterNext(server string, cursor string, iterOut interface{}) error {
+func (c *Client) iterNext(cfg *clusterconfig.ClusterConfig, server string, cursor string, iterOut interface{}) error {
 	endpoint := fmt.Sprintf("%s/iter_next?it=%s", server, url.QueryEscape(cursor))
-	resp, err := c.http.PostForm(endpoint, url.Values{})
-	if err != nil {
-		return err
-	}
+	resp, err := c.postForm(cfg, endpoint, url.Values{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return responseError(server, resp)
@@ -367,6 +413,7 @@ type RemoteObject struct {
 	Key       string
 	Size      uint64
 	Tombstone bool
+	B3sum     string
 	CreatedAt time.Time
 }
 
@@ -381,18 +428,19 @@ func (c *Client) List(cb func(RemoteObject) bool, opts ListOptions) error {
 			continue
 		}
 		server := node.Location[len(node.Location)-1]
-		cursor, err := c.iterBegin(server, "objects")
+		cursor, err := c.iterBegin(cfg, server, "objects")
 		if err != nil {
 			return err
 		}
 		objects := []struct {
 			Key                string
+			B3sum              string
 			Size               uint64
 			Tombstone          bool
 			CreatedAtUnixMicro uint64
 		}{}
 		for {
-			err := c.iterNext(server, cursor, &objects)
+			err := c.iterNext(cfg, server, cursor, &objects)
 			if err != nil {
 				return err
 			}
@@ -408,6 +456,7 @@ func (c *Client) List(cb func(RemoteObject) bool, opts ListOptions) error {
 					Key:       o.Key,
 					Size:      o.Size,
 					Tombstone: o.Tombstone,
+					B3sum:     o.B3sum,
 					CreatedAt: time.UnixMicro(int64(o.CreatedAtUnixMicro)),
 				})
 				if !cont {
@@ -435,13 +484,13 @@ func (c *Client) ListKeys(cb func(RemoteKey) bool, opts ListKeysOptions) error {
 			continue
 		}
 		server := node.Location[len(node.Location)-1]
-		cursor, err := c.iterBegin(server, "keys")
+		cursor, err := c.iterBegin(cfg, server, "keys")
 		if err != nil {
 			return err
 		}
 		keys := []string{}
 		for {
-			err := c.iterNext(server, cursor, &keys)
+			err := c.iterNext(cfg, server, cursor, &keys)
 			if err != nil {
 				return err
 			}

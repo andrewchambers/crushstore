@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,7 +29,22 @@ func internalError(w http.ResponseWriter, format string, a ...interface{}) {
 	w.Write([]byte("internal server error"))
 }
 
+func AuthorizedRequest(req *http.Request) bool {
+	cfg := GetClusterConfig()
+	authHeader := req.Header.Get("Authorization")
+	// Not much point in checking this.
+	// if !strings.HasPrefix(authHeader, "Bearer ") {
+	// 	return false
+	// }
+	return strings.HasSuffix(authHeader, cfg.ClusterSecret)
+}
+
 func placementHandler(w http.ResponseWriter, req *http.Request) {
+	if !AuthorizedRequest(req) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
 	if req.Method != "GET" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -78,6 +94,11 @@ func (of *objectContentReadSeeker) Seek(offset int64, whence int) (int64, error)
 }
 
 func getHandler(w http.ResponseWriter, req *http.Request) {
+	if !AuthorizedRequest(req) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
 	if req.Method != "GET" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -146,6 +167,10 @@ func getHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 func headHandler(w http.ResponseWriter, req *http.Request) {
+	if !AuthorizedRequest(req) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 	if req.Method != "GET" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -210,7 +235,7 @@ func headHandler(w http.ResponseWriter, req *http.Request) {
 	buf, err := json.Marshal(&struct {
 		CreatedAtUnixMicro uint64
 		Size               uint64
-		B3sum              [32]byte
+		B3sum              B3sum
 	}{
 		CreatedAtUnixMicro: header.CreatedAtUnixMicro,
 		Size:               header.Size,
@@ -236,6 +261,11 @@ func flushDir(dirPath string) error {
 }
 
 func putHandler(w http.ResponseWriter, req *http.Request) {
+	if !AuthorizedRequest(req) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
 	if req.Method != "POST" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -344,6 +374,11 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 func deleteHandler(w http.ResponseWriter, req *http.Request) {
+	if !AuthorizedRequest(req) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
 	if req.Method != "POST" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -422,6 +457,11 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 func checkHandler(w http.ResponseWriter, req *http.Request) {
+	if !AuthorizedRequest(req) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
 	if req.Method != "GET" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -477,6 +517,11 @@ func checkHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 func replicateHandler(w http.ResponseWriter, req *http.Request) {
+	if !AuthorizedRequest(req) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
 	if req.Method != "POST" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -757,6 +802,11 @@ const _ITERATOR_EXPIRY = 30 * time.Second
 var _activeIterators sync.Map
 
 func iterBeginHandler(w http.ResponseWriter, req *http.Request) {
+	if !AuthorizedRequest(req) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
 	if req.Method != "POST" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -810,6 +860,11 @@ func iterBeginHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 func iterNextHandler(w http.ResponseWriter, req *http.Request) {
+	if !AuthorizedRequest(req) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
 	if req.Method != "POST" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return

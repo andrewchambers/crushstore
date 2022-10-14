@@ -71,9 +71,16 @@ func (network *realNetwork) ReplicateObj(cfg *clusterconfig.ClusterConfig, serve
 		_ = r.Close()
 		_ = errg.Wait()
 	}()
-
 	endpoint := fmt.Sprintf("%s/replicate?cid=%s&key=%s&fanout=%t", server, cfg.ConfigId, url.QueryEscape(k), opts.Fanout)
-	resp, err := http.Post(endpoint, mpw.FormDataContentType(), r)
+	req, err := http.NewRequest("POST", endpoint, r)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", mpw.FormDataContentType())
+	if cfg.ClusterSecret != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.ClusterSecret)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -101,7 +108,14 @@ func (network *realNetwork) ReplicateObj(cfg *clusterconfig.ClusterConfig, serve
 
 func (network *realNetwork) CheckObj(cfg *clusterconfig.ClusterConfig, server string, k string) (ObjHeader, bool, error) {
 	endpoint := fmt.Sprintf("%s/check?cid=%s&key=%s", server, cfg.ConfigId, url.QueryEscape(k))
-	resp, err := http.Get(endpoint)
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return ObjHeader{}, false, err
+	}
+	if cfg.ClusterSecret != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.ClusterSecret)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return ObjHeader{}, false, fmt.Errorf("unable to check %q@%s: %w", k, server, err)
 	}

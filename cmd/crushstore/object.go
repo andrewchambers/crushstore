@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,11 +32,29 @@ const (
 	OBJECT_HEADER_SIZE = 52
 )
 
+type B3sum [32]byte
+
+func (s *B3sum) MarshalJSON() ([]byte, error) {
+	buf := [32*2 + 2]byte{}
+	hex.Encode(buf[1:len(buf)-1], (*s)[:])
+	buf[0] = '"'
+	buf[len(buf)-1] = '"'
+	return buf[:], nil
+}
+
+func (s *B3sum) UnmarshalJSON(buf []byte) error {
+	if len(buf) != 32*2+2 || buf[0] != '"' || buf[len(buf)-1] != '"' {
+		return errors.New("invalid b3sum")
+	}
+	_, err := hex.Decode((*s)[:], buf[1:len(buf)-1])
+	return err
+}
+
 type ObjHeader struct {
 	Tombstone          bool
 	CreatedAtUnixMicro uint64
 	Size               uint64
-	B3sum              [32]byte
+	B3sum              B3sum
 }
 
 func ObjHeaderFromBytes(b []byte) (ObjHeader, bool) {
