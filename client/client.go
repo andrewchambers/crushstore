@@ -365,7 +365,7 @@ type RemoteObject struct {
 }
 
 type ListOptions struct {
-	ListDeleted bool
+	Deleted bool
 }
 
 func (c *Client) List(cb func(RemoteObject) bool, opts ListOptions) error {
@@ -394,7 +394,7 @@ func (c *Client) List(cb func(RemoteObject) bool, opts ListOptions) error {
 				break
 			}
 			for _, o := range objects {
-				if o.Tombstone && !opts.ListDeleted {
+				if o.Tombstone && !opts.Deleted {
 					continue
 				}
 				cont := cb(RemoteObject{

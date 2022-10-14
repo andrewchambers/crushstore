@@ -10,6 +10,7 @@ import (
 )
 
 func main() {
+	deleted := flag.Bool("deleted", false, "List deleted keys")
 	clusterConfigFile := flag.String("cluster-config", "./crushstore-cluster.conf", "Path to cluster config.")
 
 	flag.Parse()
@@ -21,7 +22,7 @@ func main() {
 	}
 	defer c.Close()
 
-	err = c.List(func(md client.RemoteObjectMetadata) bool {
+	err = c.List(func(md client.RemoteObject) bool {
 		buf, err := json.Marshal(&md)
 		if err != nil {
 			panic(err)
@@ -32,7 +33,7 @@ func main() {
 			return false
 		}
 		return true
-	}, client.ListOptions{})
+	}, client.ListOptions{Deleted: *deleted})
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "%s\n", err)
 		os.Exit(1)
