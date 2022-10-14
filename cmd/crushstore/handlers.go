@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -280,9 +281,12 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	nReplicas, _ := strconv.Atoi(req.FormValue("replicas"))
+
 	// Do the fanout on the temporary object so the scrubber doesn't interfere.
 	err = fanoutObject(k, header, tmpF.Name(), fanoutOpts{
-		DoCheck: false,
+		Replicas: nReplicas,
+		DoCheck:  false,
 	})
 	if err != nil {
 		internalError(w, "unable to fanout %q: %s", k, err)
@@ -621,7 +625,8 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 type fanoutOpts struct {
-	DoCheck bool
+	DoCheck  bool
+	Replicas int
 }
 
 func fanoutObject(k string, header ObjHeader, objPath string, opts fanoutOpts) error {
@@ -640,7 +645,12 @@ func fanoutObject(k string, header ObjHeader, objPath string, opts fanoutOpts) e
 			return fmt.Errorf("error placing %q: %s", k, err)
 		}
 
-		for i := 0; i < len(locs); i++ {
+		minReplicas := uint64(len(locs))
+		if opts.Replicas > 0 {
+			minReplicas = uint64(opts.Replicas)
+		}
+
+		for i := uint64(0); i < minReplicas; i++ {
 			loc := locs[i]
 
 			if ThisLocation.Equals(loc) {
@@ -701,7 +711,6 @@ func fanoutObject(k string, header ObjHeader, objPath string, opts fanoutOpts) e
 			continue
 		}
 
-		minReplicas := uint64(len(locs))
 		if successfulReplications < minReplicas {
 			return fmt.Errorf("unable to replicate %q to %d servers", k, minReplicas)
 		}

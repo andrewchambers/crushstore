@@ -118,7 +118,12 @@ func (c *Client) _put(server string, k string, data io.Reader, opts PutOptions) 
 		_ = errg.Wait()
 	}()
 
-	endpoint := fmt.Sprintf("%s/put?key=%s", server, url.QueryEscape(k))
+	replicas := ""
+	if opts.Replicas > 0 {
+		replicas = fmt.Sprintf("&replicas=%d", opts.Replicas)
+	}
+
+	endpoint := fmt.Sprintf("%s/put?key=%s%s", server, url.QueryEscape(k), replicas)
 	resp, err := c.http.Post(endpoint, contentType, r)
 	if err != nil {
 		return err
@@ -138,6 +143,7 @@ func (c *Client) _put(server string, k string, data io.Reader, opts PutOptions) 
 }
 
 type PutOptions struct {
+	Replicas uint
 }
 
 func (c *Client) Put(k string, data io.ReadSeeker, opts PutOptions) error {

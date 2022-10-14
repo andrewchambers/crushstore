@@ -10,6 +10,8 @@ import (
 )
 
 func main() {
+
+	replicas := flag.Uint("replicas", 0, "The initial number of remote replicas (0 means full replication).")
 	clusterConfigFile := flag.String("cluster-config", "./crushstore-cluster.conf", "Path to cluster config.")
 
 	flag.Parse()
@@ -57,7 +59,9 @@ func main() {
 		defer f.Close()
 	}
 
-	err = c.Put(args[0], f, client.PutOptions{})
+	err = c.Put(args[0], f, client.PutOptions{
+		Replicas: *replicas,
+	})
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "%s\n", err)
 		os.Exit(1)
