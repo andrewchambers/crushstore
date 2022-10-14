@@ -40,8 +40,15 @@ func main() {
 	nodeWithMostScrubErrors := ""
 	mostScrubErrors := uint64(0)
 
+	totalClusterUsedSpace := uint64(0)
+	totalClusterFreeSpace := uint64(0)
+
 	for _, node := range status.Nodes {
 		nodeInfo := status.NodeInfo[node]
+
+		totalClusterUsedSpace += nodeInfo.UsedSpace
+		totalClusterFreeSpace += nodeInfo.FreeSpace
+
 		if leastFreeSpace == 0 || nodeInfo.FreeSpace < leastFreeSpace {
 			nodeWithLeastFreeSpace = node
 			leastFreeSpace = nodeInfo.FreeSpace
@@ -78,6 +85,8 @@ func main() {
 	_, _ = fmt.Printf("Node with longest last scrub: %q - %s\n", nodeWithLongestLastScrub, longestLastScrub)
 	_, _ = fmt.Printf("Node with longest last full scrub: %q - %s\n", nodeWithLongestLastFullScrub, longestLastFullScrub)
 	_, _ = fmt.Printf("Node with most scrub errors: %q - %d\n", nodeWithMostScrubErrors, mostScrubErrors)
+	_, _ = fmt.Printf("Total free space: %s\n", humanize.IBytes(totalClusterFreeSpace))
+	_, _ = fmt.Printf("Total used space: %s\n", humanize.IBytes(totalClusterUsedSpace))
 	_, _ = fmt.Printf("Total nodes: %d\n", len(status.Nodes))
 	_, _ = fmt.Printf("Unreachable nodes: %d\n", len(status.Unreachable))
 }
