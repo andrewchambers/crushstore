@@ -173,6 +173,27 @@ func TestPutSingleReplica(t *testing.T) {
 
 }
 
+func TestPutTooManyReplicas(t *testing.T) {
+	PrepareForTest(t)
+
+	nReplicationCalls := uint64(0)
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+		atomic.AddUint64(&nReplicationCalls, 1)
+		return nil
+	}
+
+	k := RandomKeyPrimary(t)
+
+	req := mockPutRequest(t, "key="+k+"&replicas=100", []byte("hello"))
+	rr := httptest.NewRecorder()
+	putHandler(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		body, _ := io.ReadAll(rr.Body)
+		t.Logf("body=%s", string(body))
+		t.Fatalf("request failed: %d", rr.Code)
+	}
+}
+
 func TestDelete(t *testing.T) {
 	PrepareForTest(t)
 

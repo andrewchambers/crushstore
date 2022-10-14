@@ -645,6 +645,9 @@ func fanoutObject(k string, header ObjHeader, objPath string, opts fanoutOpts) e
 			return fmt.Errorf("error placing %q: %s", k, err)
 		}
 
+		if opts.Replicas > len(locs) {
+			return fmt.Errorf("unable to satisfy %d replicas with the current placement", opts.Replicas)
+		}
 		minReplicas := uint64(len(locs))
 		if opts.Replicas > 0 {
 			minReplicas = uint64(opts.Replicas)
