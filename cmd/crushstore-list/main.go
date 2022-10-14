@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	deleted := flag.Bool("deleted", false, "List deleted keys")
+	deleted := flag.Bool("deleted", false, "List deleted objects.")
 	clusterConfigFile := flag.String("cluster-config", "./crushstore-cluster.conf", "Path to cluster config.")
 
 	flag.Parse()
