@@ -21,9 +21,10 @@ import (
 )
 
 var (
-	ScrubParallelism  = 4
-	ScrubInterval     = 24 * time.Hour
-	FullScrubInterval = 7 * 24 * time.Hour
+	ScrubParallelism    = 4
+	ScrubTempFileExpiry = 7 * 24 * time.Hour
+	ScrubInterval       = 24 * time.Hour
+	FullScrubInterval   = 7 * 24 * time.Hour
 
 	_scrubTrigger                    chan struct{} = make(chan struct{}, 1)
 	_totalScrubbedBytes              uint64
@@ -314,7 +315,7 @@ func Scrub(opts ScrubOpts) {
 				return nil
 			}
 			// Cleanup interrupted puts after a long delay.
-			if stat.ModTime().Add(24 * 90 * time.Hour).Before(time.Now()) {
+			if stat.ModTime().Add(ScrubTempFileExpiry).Before(time.Now()) {
 				log.Printf("scrubber removing expired temporary file %q", path)
 				err := os.Remove(path)
 				if err != nil {

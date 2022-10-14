@@ -15,6 +15,7 @@ var ThisLocation crush.Location
 
 func main() {
 
+	flag.DurationVar(&ScrubTempFileExpiry, "scrub-tempfile-expiry", ScrubTempFileExpiry, "The maximum lifetime of a temporary object.")
 	flag.DurationVar(&ObjectTombstoneExpiry, "tombstone-expiry", ObjectTombstoneExpiry, "Time taken for object tombstones to be removed from the system.")
 	flag.DurationVar(&ScrubInterval, "scrub-interval", ScrubInterval, "Time interval between metadata scrubs.")
 	flag.DurationVar(&FullScrubInterval, "full-scrub-interval", FullScrubInterval, "Time between full data scrubs.")
