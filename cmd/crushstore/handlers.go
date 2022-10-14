@@ -1036,17 +1036,19 @@ func nodeInfoHandler(w http.ResponseWriter, req *http.Request) {
 	freeRAM := memory.FreeMemory()
 
 	buf, err := json.Marshal(&struct {
-		LastScrubErrorCount  uint64
-		HeapAlloc            uint64
-		FreeSpace            uint64
-		UsedSpace            uint64
-		LastScrubSeconds     time.Duration
-		LastFullScrubSeconds time.Duration
-		FreeRAM              uint64
+		LastScrubErrorCount   uint64
+		HeapAlloc             uint64
+		FreeSpace             uint64
+		UsedSpace             uint64
+		LastScrubDuration     time.Duration
+		LastFullScrubDuration time.Duration
+		FreeRAM               uint64
+		ObjectCount           uint64
 	}{
 		LastScrubDuration:     scrubRecord.LastScrubDuration,
 		LastFullScrubDuration: scrubRecord.LastFullScrubDuration,
 		LastScrubErrorCount:   scrubRecord.ErrorCount(),
+		ObjectCount:           scrubRecord.LastScrubObjects,
 		HeapAlloc:             m.HeapAlloc,
 		FreeSpace:             freeSpace,
 		UsedSpace:             usedSpace,

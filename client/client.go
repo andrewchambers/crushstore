@@ -512,13 +512,14 @@ type ClusterStatusOptions struct {
 }
 
 type NodeInfo struct {
-	LastScrubErrorCount  uint64
-	HeapAlloc            uint64
-	FreeSpace            uint64
-	UsedSpace            uint64
+	LastScrubErrorCount   uint64
+	HeapAlloc             uint64
+	FreeSpace             uint64
+	UsedSpace             uint64
 	LastScrubDuration     time.Duration
 	LastFullScrubDuration time.Duration
-	FreeRAM              uint64
+	ObjectCount           uint64
+	FreeRAM               uint64
 }
 
 type ClusterStatus struct {
