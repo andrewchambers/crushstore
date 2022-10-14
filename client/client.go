@@ -507,3 +507,68 @@ func (c *Client) ListKeys(cb func(RemoteKey) bool, opts ListKeysOptions) error {
 
 	return nil
 }
+
+type ClusterStatusOptions struct {
+}
+
+type NodeInfo struct {
+	LastScrubErrorCount  uint64
+	HeapAlloc            uint64
+	FreeSpace            uint64
+	UsedSpace            uint64
+	LastScrubDuration     time.Duration
+	LastFullScrubDuration time.Duration
+	FreeRAM              uint64
+}
+
+type ClusterStatus struct {
+	Unreachable []string
+	Errors      []error
+	Nodes       []string
+	NodeInfo    map[string]NodeInfo
+}
+
+func (c *Client) ClusterStatus(opts ClusterStatusOptions) ClusterStatus {
+	cfg := c.GetClusterConfig()
+
+	status := ClusterStatus{
+		NodeInfo: make(map[string]NodeInfo),
+	}
+
+	gatherNodeInfo := func(server string) (NodeInfo, error) {
+		endpoint := fmt.Sprintf("%s/node_info", server)
+		resp, err := c.httpGet(cfg, endpoint)
+		if err != nil {
+			return NodeInfo{}, fmt.Errorf("unable to request node info from %s: %w", server, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return NodeInfo{}, responseError(server, resp)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return NodeInfo{}, fmt.Errorf("unable to read node info from %s: %w", server, err)
+		}
+		ni := NodeInfo{}
+		err = json.Unmarshal(body, &ni)
+		if err != nil {
+			return NodeInfo{}, fmt.Errorf("unable to unmarshal node info from %s: %w", server, err)
+		}
+		return ni, nil
+	}
+
+	for _, node := range cfg.StorageHierarchy.StorageNodes {
+		loc := node.Location
+		server := loc[len(loc)-1]
+		status.Nodes = append(status.Nodes, server)
+		nodeInfo, err := gatherNodeInfo(server)
+		if err != nil {
+			status.Unreachable = append(status.Unreachable, server)
+			status.Errors = append(status.Errors, err)
+		} else {
+			status.NodeInfo[server] = nodeInfo
+		}
+	}
+
+	return status
+}

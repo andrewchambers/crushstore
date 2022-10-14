@@ -16,12 +16,15 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/pbnjay/memory"
+	"golang.org/x/sys/unix"
 	"lukechampine.com/blake3"
 )
 
@@ -998,6 +1001,57 @@ func iterNextHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	buf, err := json.Marshal(items)
+	if err != nil {
+		internalError(w, "error marshalling response: %s", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(buf)
+}
+
+func nodeInfoHandler(w http.ResponseWriter, req *http.Request) {
+	if !AuthorizedRequest(req) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if req.Method != "GET" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var stat unix.Statfs_t
+	err := unix.Statfs(ObjectDir, &stat)
+	if err != nil {
+		internalError(w, "error getting disk usage: %s", err)
+		return
+	}
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	scrubRecord := GetLastScrubRecord()
+	totalSpace := stat.Blocks * uint64(stat.Frsize)
+	freeSpace := stat.Bavail * uint64(stat.Bsize)
+	usedSpace := totalSpace - freeSpace
+
+	freeRAM := memory.FreeMemory()
+
+	buf, err := json.Marshal(&struct {
+		LastScrubErrorCount  uint64
+		HeapAlloc            uint64
+		FreeSpace            uint64
+		UsedSpace            uint64
+		LastScrubSeconds     time.Duration
+		LastFullScrubSeconds time.Duration
+		FreeRAM              uint64
+	}{
+		LastScrubDuration:     scrubRecord.LastScrubDuration,
+		LastFullScrubDuration: scrubRecord.LastFullScrubDuration,
+		LastScrubErrorCount:   scrubRecord.ErrorCount(),
+		HeapAlloc:             m.HeapAlloc,
+		FreeSpace:             freeSpace,
+		UsedSpace:             usedSpace,
+		FreeRAM:               freeRAM,
+	})
 	if err != nil {
 		internalError(w, "error marshalling response: %s", err)
 		return

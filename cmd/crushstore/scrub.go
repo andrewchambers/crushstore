@@ -247,7 +247,7 @@ func Scrub(opts ScrubOpts) {
 	log.Printf("scrub started, full=%v", opts.Full)
 	atomic.StoreUint64(&_scrubInProgress, 1)
 
-	scrubRecord := GetScrubRecord()
+	scrubRecord := GetLastScrubRecord()
 	scrubStart := time.Now()
 	startTotalScrubbedObjects := atomic.LoadUint64(&_totalScrubbedObjects)
 	startTotalScrubbedBytes := atomic.LoadUint64(&_totalScrubbedBytes)
@@ -256,7 +256,7 @@ func Scrub(opts ScrubOpts) {
 	startTotalOtherErrorCount := atomic.LoadUint64(&_totalScrubOtherErrorCount)
 
 	defer func() {
-
+		scrubEnd := time.Now()
 		scrubbedObjects := atomic.LoadUint64(&_totalScrubbedObjects) - startTotalScrubbedObjects
 		scrubbedBytes := atomic.LoadUint64(&_totalScrubbedBytes) - startTotalScrubbedBytes
 		replicationErrorCount := atomic.LoadUint64(&_totalScrubReplicationErrorCount) - startTotalReplicationErrorCount
@@ -266,6 +266,8 @@ func Scrub(opts ScrubOpts) {
 		scrubRecord = ScrubRecord{
 			LastFullScrubUnix:              scrubRecord.LastFullScrubUnix,
 			LastScrubUnix:                  scrubStart.Unix(),
+			LastFullScrubDuration:          scrubRecord.LastFullScrubDuration,
+			LastScrubDuration:              scrubEnd.Sub(scrubStart),
 			LastScrubReplicationErrorCount: replicationErrorCount,
 			LastScrubCorruptionErrorCount:  corruptionErrorCount,
 			LastScrubOtherErrorCount:       otherErrorCount,
@@ -274,6 +276,7 @@ func Scrub(opts ScrubOpts) {
 		}
 		if opts.Full {
 			scrubRecord.LastFullScrubUnix = scrubRecord.LastScrubUnix
+			scrubRecord.LastFullScrubDuration = scrubRecord.LastScrubDuration
 		}
 
 		SaveScrubRecord(scrubRecord)
@@ -348,7 +351,7 @@ func ScrubForever() {
 	defer scrubTicker.Stop()
 
 	for {
-		record := GetScrubRecord()
+		record := GetLastScrubRecord()
 
 		now := time.Now()
 		lastScrub := time.Unix(record.LastScrubUnix, 0)
@@ -404,6 +407,8 @@ func TriggerScrub() bool {
 type ScrubRecord struct {
 	LastFullScrubUnix              int64
 	LastScrubUnix                  int64
+	LastFullScrubDuration          time.Duration
+	LastScrubDuration              time.Duration
 	LastScrubReplicationErrorCount uint64
 	LastScrubCorruptionErrorCount  uint64
 	LastScrubOtherErrorCount       uint64
@@ -421,7 +426,7 @@ func LastScrubHadErrors() bool {
 	return _lastScrub.ErrorCount() != 0
 }
 
-func GetScrubRecord() ScrubRecord {
+func GetLastScrubRecord() ScrubRecord {
 	_lastScrubLock.Lock()
 	defer _lastScrubLock.Unlock()
 	return _lastScrub
