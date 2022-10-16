@@ -6,23 +6,20 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/andrewchambers/crushstore/cli"
 	"github.com/andrewchambers/crushstore/client"
 )
 
 func main() {
-	deleted := flag.Bool("deleted", false, "List deleted objects.")
-	clusterConfigFile := flag.String("cluster-config", "./crushstore-cluster.conf", "Path to cluster config.")
 
+	cli.RegisterDefaultFlags()
+	deleted := flag.Bool("deleted", false, "List deleted objects.")
 	flag.Parse()
 
-	c, err := client.New(*clusterConfigFile, client.ClientOptions{})
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "error creating client: %s\n", err)
-		os.Exit(1)
-	}
+	c := cli.MustOpenClient()
 	defer c.Close()
 
-	err = c.List(func(md client.RemoteObject) bool {
+	err := c.List(func(md client.RemoteObject) bool {
 		buf, err := json.Marshal(&md)
 		if err != nil {
 			panic(err)

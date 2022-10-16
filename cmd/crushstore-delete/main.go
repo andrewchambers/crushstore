@@ -5,23 +5,21 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/andrewchambers/crushstore/cli"
 	"github.com/andrewchambers/crushstore/client"
 )
 
 func main() {
-	clusterConfigFile := flag.String("cluster-config", "./crushstore-cluster.conf", "Path to cluster config.")
+
+	cli.RegisterDefaultFlags()
 
 	flag.Parse()
 
-	c, err := client.New(*clusterConfigFile, client.ClientOptions{})
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "error creating client: %s\n", err)
-		os.Exit(1)
-	}
+	c := cli.MustOpenClient()
 	defer c.Close()
 
 	for _, arg := range flag.Args() {
-		err = c.Delete(arg, client.DeleteOptions{})
+		err := c.Delete(arg, client.DeleteOptions{})
 		if err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "%s\n", err)
 			os.Exit(1)

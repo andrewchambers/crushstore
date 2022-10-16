@@ -6,21 +6,18 @@ import (
 	"io"
 	"os"
 
+	"github.com/andrewchambers/crushstore/cli"
 	"github.com/andrewchambers/crushstore/client"
 )
 
 func main() {
 
+	cli.RegisterDefaultFlags()
 	replicas := flag.Uint("replicas", 0, "The initial number of remote replicas (0 means full replication).")
-	clusterConfigFile := flag.String("cluster-config", "./crushstore-cluster.conf", "Path to cluster config.")
 
 	flag.Parse()
 
-	c, err := client.New(*clusterConfigFile, client.ClientOptions{})
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "error creating client: %s\n", err)
-		os.Exit(1)
-	}
+	c := cli.MustOpenClient()
 	defer c.Close()
 
 	args := flag.Args()
@@ -59,7 +56,7 @@ func main() {
 		defer f.Close()
 	}
 
-	err = c.Put(args[0], f, client.PutOptions{
+	err := c.Put(args[0], f, client.PutOptions{
 		Replicas: *replicas,
 	})
 	if err != nil {

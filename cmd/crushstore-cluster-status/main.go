@@ -6,21 +6,19 @@ import (
 	"os"
 	"time"
 
+	"github.com/andrewchambers/crushstore/cli"
 	"github.com/andrewchambers/crushstore/client"
 	"github.com/dustin/go-humanize"
 )
 
 func main() {
-	clusterConfigFile := flag.String("cluster-config", "./crushstore-cluster.conf", "Path to cluster config.")
+
+	cli.RegisterDefaultFlags()
 	showErrors := flag.Bool("show-errors", false, "Print errors to stderr.")
 
 	flag.Parse()
 
-	c, err := client.New(*clusterConfigFile, client.ClientOptions{})
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "error creating client: %s\n", err)
-		os.Exit(1)
-	}
+	c := cli.MustOpenClient()
 	defer c.Close()
 
 	status := c.ClusterStatus(client.ClusterStatusOptions{})

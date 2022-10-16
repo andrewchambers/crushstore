@@ -7,22 +7,19 @@ import (
 	"io"
 	"os"
 
+	"github.com/andrewchambers/crushstore/cli"
 	"github.com/andrewchambers/crushstore/client"
 	"golang.org/x/sys/unix"
 )
 
 func main() {
 
+	cli.RegisterDefaultFlags()
 	startOffset := flag.Uint64("start-offset", 0, "Start reading object at this offset.")
-	clusterConfigFile := flag.String("cluster-config", "./crushstore-cluster.conf", "Path to cluster config.")
 
 	flag.Parse()
 
-	c, err := client.New(*clusterConfigFile, client.ClientOptions{})
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "error creating client: %s\n", err)
-		os.Exit(1)
-	}
+	c := cli.MustOpenClient()
 	defer c.Close()
 
 	args := flag.Args()

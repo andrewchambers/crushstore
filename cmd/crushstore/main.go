@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/andrewchambers/crushstore/cli"
 	"github.com/andrewchambers/crushstore/clusterconfig"
 	"github.com/andrewchambers/crushstore/crush"
 	"github.com/google/shlex"
@@ -15,6 +16,7 @@ var ThisLocation crush.Location
 
 func main() {
 
+	cli.RegisterDefaultFlags()
 	flag.DurationVar(&ScrubTempFileExpiry, "scrub-tempfile-expiry", ScrubTempFileExpiry, "The maximum lifetime of a temporary object.")
 	flag.DurationVar(&ObjectTombstoneExpiry, "tombstone-expiry", ObjectTombstoneExpiry, "Time taken for object tombstones to be removed from the system.")
 	flag.DurationVar(&ScrubInterval, "scrub-interval", ScrubInterval, "Time interval between metadata scrubs.")
@@ -24,7 +26,6 @@ func main() {
 	listenAddress := flag.String("listen-address", "", "Address to listen on.")
 	location := flag.String("location", "", "Storage location specification, defaults to http://${listen-address}.")
 	dataDir := flag.String("data-dir", "", "Directory to store objects under.")
-	clusterConfigFile := flag.String("cluster-config", "./crushstore-cluster.conf", "Path to cluster config.")
 
 	flag.Parse()
 
@@ -58,7 +59,7 @@ func main() {
 		log.Fatalf("error preparing -data-dir: %s", err)
 	}
 
-	configWatcher, err := clusterconfig.NewConfigFileWatcher(*clusterConfigFile)
+	configWatcher, err := clusterconfig.NewConfigFileWatcher(cli.ClusterConfigFile)
 	if err != nil {
 		log.Fatalf("error loading initial config: %s", err)
 	}
