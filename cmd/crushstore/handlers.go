@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -254,21 +253,10 @@ func headHandler(w http.ResponseWriter, req *http.Request) {
 	w.Write(buf)
 }
 
-func flushDir(dirPath string) error {
-	// XXX possible cache opens?
-	d, err := os.Open(dirPath)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	// XXX possible to batch syncs across goroutines?
-	return d.Sync()
-}
-
 type objectForm struct {
 	Key           string
 	ObjectPath    string
-	ObjectDir     string
+	ObjectDir     *os.File
 	TmpObjectFile *os.File
 	QueryFields   url.Values
 	Fields        map[string]string
@@ -347,10 +335,9 @@ func readObjectForm(req *http.Request) (*objectForm, bool, error) {
 			}
 
 			parsed.Key = key
-			parsed.ObjectPath = ObjectPathFromKey(key)
-			parsed.ObjectDir = filepath.Dir(parsed.ObjectPath)
+			parsed.ObjectDir, parsed.ObjectPath = ObjectDirHandleAndPathFromKey(key)
 
-			tmpF, err := os.CreateTemp(parsed.ObjectDir, "*$tmp")
+			tmpF, err := os.CreateTemp(parsed.ObjectDir.Name(), "*$tmp")
 			if err != nil {
 				return nil, false, err
 			}
@@ -460,12 +447,14 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 	err = os.Rename(tmpF.Name(), objPath)
 	if err != nil {
 		internalError(w, "io error renaming %q to %q: %s", tmpF.Name(), objPath, err)
+		return
 	}
 	objForm.TmpObjectFile = nil
 
-	err = flushDir(objDir)
+	err = objDir.Sync()
 	if err != nil {
 		internalError(w, "io error flushing: %s", err)
+		return
 	}
 
 }
@@ -487,10 +476,9 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	objPath := ObjectPathFromKey(k)
-	objDir := filepath.Dir(objPath)
+	objDir, objPath := ObjectDirHandleAndPathFromKey(k)
 
-	tmpF, err := os.CreateTemp(objDir, "obj*$tmp")
+	tmpF, err := os.CreateTemp(objDir.Name(), "obj*$tmp")
 	if err != nil {
 		internalError(w, "io error creating temporary file: %s", err)
 		return
@@ -543,12 +531,14 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 	err = os.Rename(tmpF.Name(), objPath)
 	if err != nil {
 		internalError(w, "io error renaming %q to %q: %s", tmpF.Name(), objPath, err)
+		return
 	}
 	removeTmp = false
 
-	err = flushDir(objDir)
+	err = objDir.Sync()
 	if err != nil {
 		internalError(w, "io error flushing: %s", err)
+		return
 	}
 
 }
@@ -759,12 +749,14 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 	err = os.Rename(tmpF.Name(), objPath)
 	if err != nil {
 		internalError(w, "io error renaming %q to %q: %s", tmpF.Name(), objPath, err)
+		return
 	}
 	objForm.TmpObjectFile = nil
 
-	err = flushDir(objDir)
+	err = objDir.Sync()
 	if err != nil {
 		internalError(w, "io error flushing: %s", err)
+		return
 	}
 }
 
