@@ -17,8 +17,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const MAX_REDIRECTS = 5
-
 type ClientRequestError struct {
 	Server     string
 	StatusCode int
@@ -199,12 +197,19 @@ func (c *Client) Put(k string, data io.ReadSeeker, opts PutOptions) error {
 	}
 
 	errs := []error{}
-	for _, loc := range locs {
+	for i, loc := range locs {
 		server := loc[len(loc)-1]
-		err = c.put(cfg, server, k, data, opts)
-		if err != nil {
-			errs = append(errs, err)
+		if i != 0 {
+			_, err := data.Seek(0, io.SeekStart)
+			if err != nil {
+				return err
+			}
 		}
+		err = c.put(cfg, server, k, data, opts)
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, err)
 	}
 
 	switch len(errs) {
