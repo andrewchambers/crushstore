@@ -13,7 +13,7 @@ import (
 
 func main() {
 
-	startOffset := flag.Uint64("stat-offset", 0, "Start reading object at this offset.")
+	startOffset := flag.Uint64("start-offset", 0, "Start reading object at this offset.")
 	clusterConfigFile := flag.String("cluster-config", "./crushstore-cluster.conf", "Path to cluster config.")
 
 	flag.Parse()

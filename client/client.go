@@ -81,10 +81,7 @@ func (c *Client) GetClusterConfig() *clusterconfig.ClusterConfig {
 }
 
 func responseError(server string, resp *http.Response) error {
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("unable to response from %s: %s", resp.Request.URL, err)
-	}
+	body, _ := io.ReadAll(resp.Body)
 	return &ClientRequestError{
 		Server:     server,
 		StatusCode: resp.StatusCode,
@@ -200,14 +197,24 @@ func (c *Client) Put(k string, data io.ReadSeeker, opts PutOptions) error {
 	if err != nil {
 		return err
 	}
-	// Upload to the primary server.
-	server := locs[0][len(locs[0])-1]
-	err = c.put(cfg, server, k, data, opts)
-	if err != nil {
-		// XXX HA option to put to a different server, or with fewer required replications?
-		return err
+
+	errs := []error{}
+	for _, loc := range locs {
+		server := loc[len(loc)-1]
+		err = c.put(cfg, server, k, data, opts)
+		if err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+
+	switch len(errs) {
+	case 0:
+		return nil
+	case 1:
+		return errs[0]
+	default:
+		return &MultiError{Errors: errs}
+	}
 }
 
 type ObjectReader struct {
@@ -230,15 +237,16 @@ func (c *Client) get(cfg *clusterconfig.ClusterConfig, server string, k string, 
 	}
 	c.setAuthHeaders(cfg, req)
 	if opts.StartOffset != 0 {
-		req.Header.Set("Range", fmt.Sprintf("%d-", opts.StartOffset))
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", opts.StartOffset))
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		defer resp.Body.Close()
-		return nil, responseError(server, resp)
+		err := responseError(server, resp)
+		_ = resp.Body.Close()
+		return nil, err
 	}
 	return &ObjectReader{resp: resp}, nil
 }
