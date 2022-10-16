@@ -210,58 +210,74 @@ func (c *Client) Put(k string, data io.ReadSeeker, opts PutOptions) error {
 	return nil
 }
 
-func (c *Client) get(cfg *clusterconfig.ClusterConfig, server string, k string, into io.Writer, opts GetOptions) error {
-	endpoint := fmt.Sprintf("%s/get?key=%s", server, url.QueryEscape(k))
-	resp, err := c.httpGet(cfg, endpoint)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return responseError(server, resp)
-	}
-	_, err = io.Copy(into, resp.Body)
-	if err != nil {
-		return err
-	}
-	return nil
+type ObjectReader struct {
+	resp *http.Response
 }
 
-type GetOptions struct{}
+func (or *ObjectReader) Read(buf []byte) (int, error) {
+	return or.resp.Body.Read(buf)
+}
 
-func (c *Client) Get(k string, into io.Writer, opts GetOptions) (bool, error) {
+func (or *ObjectReader) Close() error {
+	return or.resp.Body.Close()
+}
 
+func (c *Client) get(cfg *clusterconfig.ClusterConfig, server string, k string, opts GetOptions) (*ObjectReader, error) {
+	endpoint := fmt.Sprintf("%s/get?key=%s", server, url.QueryEscape(k))
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuthHeaders(cfg, req)
+	if opts.StartOffset != 0 {
+		req.Header.Set("Range", fmt.Sprintf("%d-", opts.StartOffset))
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		defer resp.Body.Close()
+		return nil, responseError(server, resp)
+	}
+	return &ObjectReader{resp: resp}, nil
+}
+
+type GetOptions struct {
+	StartOffset uint64
+}
+
+func (c *Client) Get(k string, opts GetOptions) (*ObjectReader, bool, error) {
 	cfg := c.GetClusterConfig()
 	locs, err := cfg.Crush(k)
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
-
 	errs := []error{}
 	for _, loc := range locs {
 		server := loc[len(loc)-1]
-		err := c.get(cfg, server, k, into, opts)
+		objReader, err := c.get(cfg, server, k, opts)
 		if err != nil {
 			if err, ok := err.(*ClientRequestError); ok {
 				if err.StatusCode == http.StatusNotFound {
 					continue
 				}
 				if err.StatusCode == http.StatusGone {
-					return false, nil
+					return nil, false, nil
 				}
 			}
 			errs = append(errs, err)
 			break
 		}
-		return true, nil
+		return objReader, true, nil
 	}
 	switch len(errs) {
 	case 0:
-		return false, nil
+		return nil, false, nil
 	case 1:
-		return false, errs[0]
+		return nil, false, errs[0]
 	default:
-		return false, &MultiError{Errors: errs}
+		return nil, false, &MultiError{Errors: errs}
 	}
 }
 
