@@ -255,6 +255,7 @@ func headHandler(w http.ResponseWriter, req *http.Request) {
 
 type objectForm struct {
 	Key           string
+	ObjectHeader  ObjHeader
 	ObjectPath    string
 	ObjectDir     *os.File
 	TmpObjectFile *os.File
@@ -280,8 +281,12 @@ func (form *objectForm) Cleanup() {
 	}
 }
 
+type readObjectFormOptions struct {
+	AddHeader bool
+}
+
 // Our own version because the stdlib doesn't let us read directly into the object directory without a copy.
-func readObjectForm(req *http.Request) (*objectForm, bool, error) {
+func readObjectForm(req *http.Request, opts readObjectFormOptions) (*objectForm, bool, error) {
 
 	query := req.URL.Query()
 	parsed := &objectForm{
@@ -325,6 +330,7 @@ func readObjectForm(req *http.Request) (*objectForm, bool, error) {
 		name := p.FormName()
 		fileName := p.FileName()
 		if fileName != "" {
+
 			if fileName != "data" || parsed.TmpObjectFile != nil {
 				return nil, false, nil
 			}
@@ -343,9 +349,65 @@ func readObjectForm(req *http.Request) (*objectForm, bool, error) {
 			}
 			parsed.TmpObjectFile = tmpF
 
-			_, err = io.Copy(tmpF, p)
-			if err != nil {
-				return nil, false, err
+			if opts.AddHeader {
+				_, err = tmpF.Seek(OBJECT_HEADER_SIZE, io.SeekStart)
+				if err != nil {
+					return nil, false, err
+				}
+
+				hasher := blake3.New(32, nil)
+				size, err := io.Copy(io.MultiWriter(tmpF, hasher), p)
+				if err != nil {
+					return nil, false, err
+				}
+				parsed.ObjectHeader = ObjHeader{
+					Tombstone:          false,
+					CreatedAtUnixMicro: uint64(time.Now().UnixMicro()),
+					Size:               uint64(size),
+				}
+				copy(parsed.ObjectHeader.B3sum[:], hasher.Sum(nil))
+				headerBytes := parsed.ObjectHeader.ToBytes()
+
+				_, err = tmpF.WriteAt(headerBytes[:], 0)
+				if err != nil {
+					return nil, false, err
+				}
+
+			} else {
+
+				headerBytes := [OBJECT_HEADER_SIZE]byte{}
+				_, err := io.ReadFull(p, headerBytes[:])
+				if err != nil {
+					return nil, false, err
+				}
+
+				_, err = tmpF.Write(headerBytes[:])
+				if err != nil {
+					return nil, false, err
+				}
+
+				header, ok := ObjHeaderFromBytes(headerBytes[:])
+				if !ok {
+					return nil, false, nil
+				}
+
+				hasher := blake3.New(32, nil)
+				size, err := io.Copy(io.MultiWriter(hasher, tmpF), p)
+				if err != nil {
+					return nil, false, err
+				}
+
+				if header.Size != uint64(size) {
+					return nil, false, nil
+				}
+
+				actualB3sum := B3sum{}
+				copy(actualB3sum[:], hasher.Sum(nil))
+				if header.B3sum != actualB3sum {
+					return nil, false, nil
+				}
+
+				parsed.ObjectHeader = header
 			}
 
 			_, err = tmpF.Seek(0, io.SeekStart)
@@ -375,7 +437,7 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	objForm, ok, err := readObjectForm(req)
+	objForm, ok, err := readObjectForm(req, readObjectFormOptions{AddHeader: true})
 	if err != nil {
 		internalError(w, "io error reading post: %s", err)
 		return
@@ -395,32 +457,8 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 	nReplicas, _ := strconv.Atoi(objForm.FormValue("replicas"))
 	objPath := objForm.ObjectPath
 	objDir := objForm.ObjectDir
+	header := objForm.ObjectHeader
 	tmpF := objForm.TmpObjectFile
-
-	header := ObjHeader{}
-	header.Tombstone = false
-	header.CreatedAtUnixMicro = uint64(time.Now().UnixMicro())
-	nullHdr := [OBJECT_HEADER_SIZE]byte{}
-	_, err = tmpF.Write(nullHdr[:])
-	if err != nil {
-		internalError(w, "io error writing %q: %s", tmpF.Name(), err)
-		return
-	}
-
-	hasher := blake3.New(32, nil)
-	size, err := io.Copy(hasher, tmpF)
-	if err != nil {
-		internalError(w, "io error writing %q: %s", tmpF.Name(), err)
-		return
-	}
-	header.Size = uint64(size)
-	copy(header.B3sum[:], hasher.Sum(nil))
-	headerBytes := header.ToBytes()
-	_, err = tmpF.WriteAt(headerBytes[:], 0)
-	if err != nil {
-		internalError(w, "io error writing %q: %s", tmpF.Name(), err)
-		return
-	}
 
 	// Do the fanout on the temporary object so the scrubber doesn't interfere.
 	err = fanoutObject(k, header, tmpF.Name(), fanoutOpts{
@@ -614,7 +652,7 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	objForm, ok, err := readObjectForm(req)
+	objForm, ok, err := readObjectForm(req, readObjectFormOptions{AddHeader: false})
 	if err != nil {
 		internalError(w, "io error reading post: %s", err)
 		return
@@ -633,6 +671,7 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 	}
 	cid := objForm.FormValue("cid")
 	fanout := objForm.FormValue("fanout") == "true"
+	header := objForm.ObjectHeader
 	objPath := objForm.ObjectPath
 	objDir := objForm.ObjectDir
 	tmpF := objForm.TmpObjectFile
@@ -645,47 +684,6 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusMisdirectedRequest)
-		return
-	}
-
-	headerBytes := [OBJECT_HEADER_SIZE]byte{}
-	_, err = io.ReadFull(tmpF, headerBytes[:])
-	if err != nil {
-		if errors.Is(err, io.ErrUnexpectedEOF) {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("unexpected EOF"))
-			return
-		} else {
-			internalError(w, "unable to read put object: %s", err)
-			return
-		}
-	}
-
-	header, ok := ObjHeaderFromBytes(headerBytes[:])
-	if !ok {
-		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, "bad header checksum")
-		return
-	}
-
-	hasher := blake3.New(32, nil)
-	size, err := io.Copy(hasher, tmpF)
-	if err != nil {
-		internalError(w, "io error writing %q: %s", tmpF.Name(), err)
-		return
-	}
-
-	if header.Size != uint64(size) {
-		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, fmt.Sprintf("object header size is %d but read %d bytes", header.Size, size))
-		return
-	}
-
-	actualB3sum := [32]byte{}
-	copy(actualB3sum[:], hasher.Sum(nil))
-	if header.B3sum != actualB3sum {
-		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, "sent hash did not equal computed hash")
 		return
 	}
 
