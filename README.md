@@ -44,6 +44,7 @@ $ mkdir bin
 $ cp $(find ./cmd -type f -executable) ./bin
 $ ls ./bin
 crushstore
+crushstore-cluster-status
 crushstore-delete
 crushstore-get
 crushstore-head
