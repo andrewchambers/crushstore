@@ -11,7 +11,13 @@ to a distributed hash table lookup.
 
 Periodically (and after configuration changes), all storage nodes will 'scrub' their data
 directory looking for corrupt objects and ensuring the storage placement requirements are met,
-replicating data to other nodes if they are not. 
+replicating data to other nodes if they are not.
+
+If storage nodes disagree on the current cluster configuration, replication requests will be rejected and
+retried until the configurations are in agreement again.
+It is the responsibility of the administrator to keep the cluster configurations consistent in a timely way
+(This can be done with NFS/rsync+cron/git + cron/watching a consul key/...).
+
 
 ## Use cases and limitations
 
@@ -29,7 +35,7 @@ Like a hash table, it supports the following operations:
 Unlike a hash table, CrushStore has an additional constraint:
 
 Writes to a key are eventually consistent - upload conflicts are resolved by the create timestamp
-and reading from a different server you just wrote to may return a different value is
+and reading from a different server you just wrote to may return a different value if
 the correct value has not been replicated.
 
 # Getting started
