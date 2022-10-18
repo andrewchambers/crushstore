@@ -101,6 +101,15 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 		return
 	}
 
+	if header.IsExpired(time.Now()) {
+		log.Printf("scrubber removing %q, it has expired", objPath)
+		err := os.Remove(objPath)
+		if err != nil {
+			logScrubError(SCRUB_EOTHER, "unable to remove %q: %s", objPath, err)
+		}
+		return
+	}
+
 	if opts.Full {
 		actualB3sum := [32]byte{}
 		hasher := blake3.New(32, nil)
@@ -122,20 +131,6 @@ func ScrubObject(objPath string, opts ScrubOpts) {
 		_, err = objF.Seek(0, io.SeekStart)
 		if err != nil {
 			logScrubError(SCRUB_EOTHER, "io error seeking %q", objPath)
-			return
-		}
-
-		// We only trust a tombstone after it has been fully scrubbed.
-		if header.IsExpired(time.Now()) {
-			log.Printf("scrubber removing %q, it has expired", objPath)
-			err := os.Remove(objPath)
-			if err != nil {
-				logScrubError(SCRUB_EOTHER, "unable to remove %q: %s", objPath, err)
-			}
-			return
-		}
-	} else {
-		if header.IsExpired(time.Now()) {
 			return
 		}
 	}
