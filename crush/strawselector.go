@@ -17,9 +17,9 @@ func NewStrawSelector(nodes []Node) *StrawSelector {
 		Straws: make(map[Node]int64),
 	}
 	numLeft := len(nodes)
-	var straw float64 = 1.0
-	var wbelow float64 = 0.0
-	var lastw float64 = 0.0
+	straw := float64(1.0)
+	wbelow := float64(0.0)
+	lastw := float64(0.0)
 	i := 0
 	for i < len(nodes) {
 		current := nodes[i]
@@ -47,7 +47,7 @@ func NewStrawSelector(nodes []Node) *StrawSelector {
 				break
 			}
 		}
-		var wnext float64 = float64(int64(numLeft) * (current.GetWeight() - previous.GetWeight()))
+		wnext := float64(int64(numLeft) * (current.GetWeight() - previous.GetWeight()))
 		pbelow := wbelow / (wbelow + wnext)
 		straw *= math.Pow(1.0/pbelow, 1.0/float64(numLeft))
 		lastw = float64(previous.GetWeight())
@@ -56,9 +56,7 @@ func NewStrawSelector(nodes []Node) *StrawSelector {
 }
 
 func weightedScore(child Node, straw int64, input int64, round int64) int64 {
-
 	digest := xxhash.Digest{}
-
 	err := binary.Write(&digest, binary.LittleEndian, input)
 	if err != nil {
 		panic(err)
@@ -73,7 +71,7 @@ func weightedScore(child Node, straw int64, input int64, round int64) int64 {
 	}
 	hash := int64(digest.Sum64())
 	hash = hash & 0xFFFF
-	var weightedScore = hash * straw
+	weightedScore := hash * straw
 	return weightedScore
 }
 
@@ -81,14 +79,14 @@ func (s *StrawSelector) Select(input int64, round int64) Node {
 	var result Node
 	var hiScore = int64(-1)
 	for child, straw := range s.Straws {
-		var score = weightedScore(child, straw, input, round)
-		if score > hiScore {
+		score := weightedScore(child, straw, input, round)
+		if result == nil || score > hiScore || (score == hiScore && child.GetId() > result.GetId()) {
 			result = child
 			hiScore = score
 		}
 	}
 	if result == nil {
-		panic("Illegal state")
+		panic("bug")
 	}
 	return result
 }

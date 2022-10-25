@@ -46,7 +46,7 @@ func PrepareForTest(t *testing.T) {
 		t.Fatal(err)
 	}
 	TheNetwork = &MockNetwork{
-		ReplicateFunc: func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+		ReplicateFunc: func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error {
 			return nil
 		},
 		CheckFunc: func(clusterConfig *clusterconfig.ClusterConfig, server string, k string) (ObjHeader, bool, error) {

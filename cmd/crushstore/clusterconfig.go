@@ -18,7 +18,7 @@ func SetConfigWatcher(w clusterconfig.ConfigWatcher) {
 		if !cfg.StorageHierarchy.ContainsStorageNodeAtLocation(ThisLocation) {
 			log.Printf("WARNING - config storage hierarchy does not contain the current node at %s", ThisLocation)
 		}
-		TriggerScrub()
+		TriggerScrub(TriggerScrubOptions{FullScrub: false})
 	})
 	TheConfigWatcher = w
 }

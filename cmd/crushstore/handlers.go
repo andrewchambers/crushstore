@@ -822,7 +822,7 @@ func fanoutObject(k string, header ObjHeader, objPath string, opts fanoutOpts) e
 				}
 				defer objF.Close()
 				log.Printf("replicating %q to %s", k, server)
-				err = ReplicateObj(clusterConfig, server, k, objF, ReplicateOpts{})
+				err = ReplicateObj(clusterConfig, server, k, objF, ReplicateOptions{})
 				if err != nil {
 					log.Printf("error replicating %q to %s: %s", k, server, err)
 					if err == ErrMisdirectedRequest {
@@ -999,6 +999,21 @@ func iterNextHandler(w http.ResponseWriter, req *http.Request) {
 	w.Write(buf)
 }
 
+func startScrubHandler(w http.ResponseWriter, req *http.Request) {
+	if !AuthorizedRequest(req) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	if req.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	full := req.FormValue("full") == "true"
+	TriggerScrub(TriggerScrubOptions{FullScrub: full})
+}
+
 func nodeInfoHandler(w http.ResponseWriter, req *http.Request) {
 	if !AuthorizedRequest(req) {
 		w.WriteHeader(http.StatusForbidden)
@@ -1026,23 +1041,47 @@ func nodeInfoHandler(w http.ResponseWriter, req *http.Request) {
 	freeRAM := memory.FreeMemory()
 
 	buf, err := json.Marshal(&struct {
-		LastScrubErrorCount   uint64
-		HeapAlloc             uint64
-		FreeSpace             uint64
-		UsedSpace             uint64
-		LastScrubDuration     time.Duration
-		LastFullScrubDuration time.Duration
-		FreeRAM               uint64
-		ObjectCount           uint64
+		HeapAlloc                          uint64
+		FreeSpace                          uint64
+		UsedSpace                          uint64
+		TotalScrubbedObjects               uint64
+		TotalScrubCorruptionErrorCount     uint64
+		TotalScrubReplicationErrorCount    uint64
+		TotalScrubOtherErrorCount          uint64
+		LastScrubReplicationErrorCount     uint64
+		LastScrubCorruptionErrorCount      uint64
+		LastScrubOtherErrorCount           uint64
+		LastScrubUnixMicro                 uint64
+		LastScrubDuration                  time.Duration
+		LastScrubStartingConfigId          string
+		LastFullScrubReplicationErrorCount uint64
+		LastFullScrubCorruptionErrorCount  uint64
+		LastFullScrubOtherErrorCount       uint64
+		LastFullScrubUnixMicro             uint64
+		LastFullScrubDuration              time.Duration
+		FreeRAM                            uint64
+		LastScrubObjects                   uint64
 	}{
-		LastScrubDuration:     scrubRecord.LastScrubDuration,
-		LastFullScrubDuration: scrubRecord.LastFullScrubDuration,
-		LastScrubErrorCount:   scrubRecord.ErrorCount(),
-		ObjectCount:           scrubRecord.LastScrubObjects,
-		HeapAlloc:             m.HeapAlloc,
-		FreeSpace:             freeSpace,
-		UsedSpace:             usedSpace,
-		FreeRAM:               freeRAM,
+		TotalScrubbedObjects:               TotalScrubbedObjects(),
+		TotalScrubCorruptionErrorCount:     TotalScrubCorruptionErrorCount(),
+		TotalScrubReplicationErrorCount:    TotalScrubReplicationErrorCount(),
+		TotalScrubOtherErrorCount:          TotalScrubOtherErrorCount(),
+		LastScrubStartingConfigId:          scrubRecord.LastScrubStartingConfigId,
+		LastScrubUnixMicro:                 scrubRecord.LastScrubUnixMicro,
+		LastScrubDuration:                  scrubRecord.LastScrubDuration,
+		LastFullScrubUnixMicro:             scrubRecord.LastFullScrubUnixMicro,
+		LastFullScrubDuration:              scrubRecord.LastFullScrubDuration,
+		LastFullScrubReplicationErrorCount: scrubRecord.LastFullScrubReplicationErrorCount,
+		LastFullScrubCorruptionErrorCount:  scrubRecord.LastFullScrubCorruptionErrorCount,
+		LastFullScrubOtherErrorCount:       scrubRecord.LastFullScrubOtherErrorCount,
+		LastScrubReplicationErrorCount:     scrubRecord.LastScrubReplicationErrorCount,
+		LastScrubCorruptionErrorCount:      scrubRecord.LastScrubCorruptionErrorCount,
+		LastScrubOtherErrorCount:           scrubRecord.LastScrubOtherErrorCount,
+		LastScrubObjects:                   scrubRecord.LastScrubObjects,
+		HeapAlloc:                          m.HeapAlloc,
+		FreeSpace:                          freeSpace,
+		UsedSpace:                          usedSpace,
+		FreeRAM:                            freeRAM,
 	})
 	if err != nil {
 		internalError(w, "error marshalling response: %s", err)

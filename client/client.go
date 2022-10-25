@@ -538,17 +538,52 @@ func (c *Client) ListKeys(cb func(RemoteKey) bool, opts ListKeysOptions) error {
 }
 
 type ClusterStatusOptions struct {
+	QueryDefunct bool
 }
 
 type NodeInfo struct {
-	LastScrubErrorCount   uint64
-	HeapAlloc             uint64
-	FreeSpace             uint64
-	UsedSpace             uint64
-	LastScrubDuration     time.Duration
-	LastFullScrubDuration time.Duration
-	ObjectCount           uint64
-	FreeRAM               uint64
+	HeapAlloc                          uint64
+	FreeSpace                          uint64
+	UsedSpace                          uint64
+	FreeRAM                            uint64
+	TotalScrubbedObjects               uint64
+	TotalScrubCorruptionErrorCount     uint64
+	TotalScrubReplicationErrorCount    uint64
+	TotalScrubOtherErrorCount          uint64
+	LastScrubStartingConfigId          string
+	LastScrubUnixMicro                 uint64
+	LastScrubCorruptionErrorCount      uint64
+	LastScrubReplicationErrorCount     uint64
+	LastScrubOtherErrorCount           uint64
+	LastFullScrubUnixMicro             uint64
+	LastScrubDuration                  time.Duration
+	LastFullScrubDuration              time.Duration
+	LastFullScrubCorruptionErrorCount  uint64
+	LastFullScrubReplicationErrorCount uint64
+	LastFullScrubOtherErrorCount       uint64
+	LastScrubObjects                   uint64
+}
+
+func (c *Client) nodeInfo(cfg *clusterconfig.ClusterConfig, server string) (NodeInfo, error) {
+	endpoint := fmt.Sprintf("%s/node_info", server)
+	resp, err := c.httpGet(cfg, endpoint)
+	if err != nil {
+		return NodeInfo{}, fmt.Errorf("unable to request node info from %s: %w", server, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return NodeInfo{}, responseError(server, resp)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return NodeInfo{}, fmt.Errorf("unable to read node info from %s: %w", server, err)
+	}
+	ni := NodeInfo{}
+	err = json.Unmarshal(body, &ni)
+	if err != nil {
+		return NodeInfo{}, fmt.Errorf("unable to unmarshal node info from %s: %w", server, err)
+	}
+	return ni, nil
 }
 
 type ClusterStatus struct {
@@ -565,33 +600,14 @@ func (c *Client) ClusterStatus(opts ClusterStatusOptions) ClusterStatus {
 		NodeInfo: make(map[string]NodeInfo),
 	}
 
-	gatherNodeInfo := func(server string) (NodeInfo, error) {
-		endpoint := fmt.Sprintf("%s/node_info", server)
-		resp, err := c.httpGet(cfg, endpoint)
-		if err != nil {
-			return NodeInfo{}, fmt.Errorf("unable to request node info from %s: %w", server, err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return NodeInfo{}, responseError(server, resp)
-		}
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return NodeInfo{}, fmt.Errorf("unable to read node info from %s: %w", server, err)
-		}
-		ni := NodeInfo{}
-		err = json.Unmarshal(body, &ni)
-		if err != nil {
-			return NodeInfo{}, fmt.Errorf("unable to unmarshal node info from %s: %w", server, err)
-		}
-		return ni, nil
-	}
-
 	for _, node := range cfg.StorageHierarchy.StorageNodes {
+		if node.IsDefunct() && !opts.QueryDefunct {
+			continue
+		}
 		loc := node.Location
 		server := loc[len(loc)-1]
 		status.Nodes = append(status.Nodes, server)
-		nodeInfo, err := gatherNodeInfo(server)
+		nodeInfo, err := c.nodeInfo(cfg, server)
 		if err != nil {
 			status.Unreachable = append(status.Unreachable, server)
 			status.Errors = append(status.Errors, err)
@@ -601,4 +617,109 @@ func (c *Client) ClusterStatus(opts ClusterStatusOptions) ClusterStatus {
 	}
 
 	return status
+}
+
+type ScrubClusterOptions struct {
+	PollInterval time.Duration
+	FullScrub    bool
+}
+
+type ScrubClusterProgress struct {
+	ApproximatePercentComplete float64
+	NodesRemaining             uint64
+	ScrubbedObjects            uint64
+	ReplicationErrors          uint64
+	CorruptionErrors           uint64
+	OtherErrors                uint64
+}
+
+func (c *Client) ScrubCluster(OnProgress func(ScrubClusterProgress), opts ScrubClusterOptions) error {
+
+	if opts.PollInterval == 0 {
+		opts.PollInterval = 2 * time.Second
+	}
+
+	startTimeUnixMicro := uint64(time.Now().UnixMicro())
+	// Sleep to help take into account clock drift in the cluster,
+	// this machine must be less than two seconds ahead.
+	time.Sleep(2 * time.Second)
+
+	lastScrubTotalObjects := uint64(0)
+	startScrubbedObjects := uint64(0)
+	startReplicationErrors := uint64(0)
+	startCorruptionErrors := uint64(0)
+	startOtherErrors := uint64(0)
+
+	cfg := c.GetClusterConfig()
+	for _, node := range cfg.StorageHierarchy.StorageNodes {
+		if node.IsDefunct() {
+			continue
+		}
+		loc := node.Location
+		server := loc[len(loc)-1]
+
+		nodeInfo, err := c.nodeInfo(cfg, server)
+		if err != nil {
+			return fmt.Errorf("unable to query scrub info for %s: %w", server, err)
+		}
+		lastScrubTotalObjects += nodeInfo.LastScrubObjects
+		startScrubbedObjects += nodeInfo.TotalScrubbedObjects
+		startReplicationErrors += nodeInfo.TotalScrubReplicationErrorCount
+		startCorruptionErrors += nodeInfo.TotalScrubCorruptionErrorCount
+		startOtherErrors += nodeInfo.TotalScrubOtherErrorCount
+		endpoint := fmt.Sprintf("%s/start_scrub?full=%v", server, opts.FullScrub)
+		_, err = c.postForm(cfg, endpoint, url.Values{})
+		if err != nil {
+			return fmt.Errorf("unable to start scrub of %s: %w", server, err)
+		}
+	}
+
+	for {
+		nodesRemaining := uint64(0)
+		scrubbedObjects := uint64(0)
+		replicationErrors := uint64(0)
+		corruptionErrors := uint64(0)
+		otherErrors := uint64(0)
+
+		cfg = c.GetClusterConfig()
+		for _, node := range cfg.StorageHierarchy.StorageNodes {
+			if node.IsDefunct() {
+				continue
+			}
+			loc := node.Location
+			server := loc[len(loc)-1]
+			nodeInfo, err := c.nodeInfo(cfg, server)
+			if err != nil {
+				return fmt.Errorf("unable to query scrub info for %s: %w", server, err)
+			}
+
+			if opts.FullScrub {
+				if nodeInfo.LastFullScrubUnixMicro < startTimeUnixMicro {
+					nodesRemaining += 1
+				}
+			} else {
+				if nodeInfo.LastScrubUnixMicro < startTimeUnixMicro {
+					nodesRemaining += 1
+				}
+			}
+			scrubbedObjects += nodeInfo.TotalScrubbedObjects
+			replicationErrors += nodeInfo.TotalScrubReplicationErrorCount
+			corruptionErrors += nodeInfo.TotalScrubCorruptionErrorCount
+			otherErrors += nodeInfo.TotalScrubOtherErrorCount
+		}
+		OnProgress(ScrubClusterProgress{
+			ApproximatePercentComplete: (float64(scrubbedObjects-startScrubbedObjects) / float64(lastScrubTotalObjects)) * 100,
+			NodesRemaining:             nodesRemaining,
+			ScrubbedObjects:            scrubbedObjects - startScrubbedObjects,
+			ReplicationErrors:          replicationErrors - startReplicationErrors,
+			CorruptionErrors:           corruptionErrors - startCorruptionErrors,
+			OtherErrors:                replicationErrors - startReplicationErrors,
+		})
+		if nodesRemaining == 0 {
+			break
+		}
+		time.Sleep(opts.PollInterval)
+	}
+
+	return nil
 }

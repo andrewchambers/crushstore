@@ -75,6 +75,7 @@ func main() {
 	http.HandleFunc("/iter_begin", iterBeginHandler)
 	http.HandleFunc("/iter_next", iterNextHandler)
 	http.HandleFunc("/node_info", nodeInfoHandler)
+	http.HandleFunc("/start_scrub", startScrubHandler)
 	// cluster internal end points.
 	http.HandleFunc("/replicate", replicateHandler)
 	http.HandleFunc("/check", checkHandler)

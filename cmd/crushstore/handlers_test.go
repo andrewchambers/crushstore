@@ -94,7 +94,7 @@ func TestPutAndGet(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -145,7 +145,7 @@ func TestPutSingleReplica(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -177,7 +177,7 @@ func TestPutTooManyReplicas(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -198,7 +198,7 @@ func TestDelete(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -255,7 +255,7 @@ func TestReplicateWithFanout(t *testing.T) {
 
 	nReplicationCalls := uint64(0)
 	nCheckCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -380,7 +380,7 @@ func TestReplicateNoFanout(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}
@@ -426,7 +426,7 @@ func TestReplicateRejectsCorrupt(t *testing.T) {
 	PrepareForTest(t)
 
 	nReplicationCalls := uint64(0)
-	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+	TheNetwork.(*MockNetwork).ReplicateFunc = func(clusterConfig *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error {
 		atomic.AddUint64(&nReplicationCalls, 1)
 		return nil
 	}

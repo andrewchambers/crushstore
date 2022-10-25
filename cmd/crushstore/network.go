@@ -17,11 +17,11 @@ import (
 
 var TheNetwork Network = &realNetwork{}
 
-type ReplicateOpts struct {
+type ReplicateOptions struct {
 	Fanout bool
 }
 
-func ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+func ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error {
 	return TheNetwork.ReplicateObj(cfg, server, k, f, opts)
 }
 func CheckObj(cfg *clusterconfig.ClusterConfig, server string, k string) (ObjHeader, bool, error) {
@@ -30,7 +30,7 @@ func CheckObj(cfg *clusterconfig.ClusterConfig, server string, k string) (ObjHea
 
 // Represents the connection to outside nodes.
 type Network interface {
-	ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error
+	ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error
 	CheckObj(cfg *clusterconfig.ClusterConfig, server string, k string) (ObjHeader, bool, error)
 }
 
@@ -40,7 +40,7 @@ var (
 	ErrMisdirectedRequest error = errors.New("misdirected request")
 )
 
-func (network *realNetwork) ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+func (network *realNetwork) ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error {
 
 	_, err := f.Seek(0, io.SeekStart)
 	if err != nil {
@@ -143,11 +143,11 @@ func (network *realNetwork) CheckObj(cfg *clusterconfig.ClusterConfig, server st
 }
 
 type MockNetwork struct {
-	ReplicateFunc func(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error
+	ReplicateFunc func(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error
 	CheckFunc     func(cfg *clusterconfig.ClusterConfig, server string, k string) (ObjHeader, bool, error)
 }
 
-func (network *MockNetwork) ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOpts) error {
+func (network *MockNetwork) ReplicateObj(cfg *clusterconfig.ClusterConfig, server string, k string, f *os.File, opts ReplicateOptions) error {
 	return network.ReplicateFunc(cfg, server, k, f, opts)
 }
 

@@ -27,13 +27,13 @@ var (
 	FullScrubInterval   = 7 * 24 * time.Hour
 
 	_scrubTrigger                    chan struct{} = make(chan struct{}, 1)
+	_scrubTriggerForceFull           uint32
 	_totalScrubbedBytes              uint64
 	_totalScrubbedObjects            uint64
 	_totalScrubCorruptionErrorCount  uint64
 	_totalScrubOtherErrorCount       uint64
 	_totalScrubReplicationErrorCount uint64
 	_scrubInProgress                 uint64
-	_scrubsCompleted                 uint64
 
 	_lastScrubLock sync.Mutex
 	_lastScrub     ScrubRecord
@@ -58,8 +58,6 @@ func logScrubError(class int, format string, a ...interface{}) {
 }
 
 func ScrubObject(objPath string, opts ScrubOpts) {
-	log.Printf("scrubbing object at %q", objPath)
-
 	k, err := url.QueryUnescape(filepath.Base(objPath))
 	if err != nil {
 		log.Printf("scrubber removing %q, not a valid object", objPath)
@@ -157,10 +155,10 @@ rebalanceAgain:
 		return
 	}
 	primaryLoc := locs[0]
-
 	if ThisLocation.Equals(primaryLoc) {
 		for i := 1; i < len(locs); i++ {
-			server := locs[i][len(locs[i])-1]
+			loc := locs[i]
+			server := loc[len(loc)-1]
 			existingHeader, ok, err := CheckObj(clusterConfig, server, k)
 			if err != nil {
 				if err == ErrMisdirectedRequest {
@@ -171,7 +169,7 @@ rebalanceAgain:
 			}
 			if !ok || header.After(&existingHeader) {
 				log.Printf("scrubber replicating %q to %s", k, server)
-				err := ReplicateObj(clusterConfig, server, k, objF, ReplicateOpts{})
+				err := ReplicateObj(clusterConfig, server, k, objF, ReplicateOptions{})
 				if err != nil {
 					if err == ErrMisdirectedRequest {
 						goto rebalanceAgain
@@ -192,7 +190,7 @@ rebalanceAgain:
 		}
 		if !ok || header.After(&existingHeader) {
 			log.Printf("restoring %q to primary server %s", k, primaryServer)
-			err := ReplicateObj(clusterConfig, primaryServer, k, objF, ReplicateOpts{Fanout: true})
+			err := ReplicateObj(clusterConfig, primaryServer, k, objF, ReplicateOptions{Fanout: true})
 			if err != nil {
 				if err == ErrMisdirectedRequest {
 					goto rebalanceAgain
@@ -223,6 +221,7 @@ rebalanceAgain:
 				break
 			}
 		}
+
 		if !keepObject {
 			log.Printf("scrubber removing %q, it has been moved", k)
 			err = os.Remove(objPath)
@@ -244,6 +243,7 @@ func Scrub(opts ScrubOpts) {
 
 	scrubRecord := GetLastScrubRecord()
 	scrubStart := time.Now()
+	startConfigId := GetClusterConfig().ConfigId
 	startTotalScrubbedObjects := atomic.LoadUint64(&_totalScrubbedObjects)
 	startTotalScrubbedBytes := atomic.LoadUint64(&_totalScrubbedBytes)
 	startTotalReplicationErrorCount := atomic.LoadUint64(&_totalScrubReplicationErrorCount)
@@ -252,6 +252,7 @@ func Scrub(opts ScrubOpts) {
 
 	defer func() {
 		scrubEnd := time.Now()
+		scrubDuration := scrubEnd.Sub(scrubStart)
 		scrubbedObjects := atomic.LoadUint64(&_totalScrubbedObjects) - startTotalScrubbedObjects
 		scrubbedBytes := atomic.LoadUint64(&_totalScrubbedBytes) - startTotalScrubbedBytes
 		replicationErrorCount := atomic.LoadUint64(&_totalScrubReplicationErrorCount) - startTotalReplicationErrorCount
@@ -259,26 +260,43 @@ func Scrub(opts ScrubOpts) {
 		otherErrorCount := atomic.LoadUint64(&_totalScrubOtherErrorCount) - startTotalOtherErrorCount
 
 		scrubRecord = ScrubRecord{
-			LastFullScrubUnix:              scrubRecord.LastFullScrubUnix,
-			LastScrubUnix:                  scrubStart.Unix(),
-			LastFullScrubDuration:          scrubRecord.LastFullScrubDuration,
-			LastScrubDuration:              scrubEnd.Sub(scrubStart),
+			ScrubsCompleted: scrubRecord.ScrubsCompleted,
+
+			LastScrubStartingConfigId:      startConfigId,
+			LastScrubUnixMicro:             uint64(scrubStart.UnixMicro()),
+			LastScrubDuration:              scrubDuration,
 			LastScrubReplicationErrorCount: replicationErrorCount,
 			LastScrubCorruptionErrorCount:  corruptionErrorCount,
 			LastScrubOtherErrorCount:       otherErrorCount,
 			LastScrubBytes:                 scrubbedBytes,
 			LastScrubObjects:               scrubbedObjects,
+
+			LastFullScrubUnixMicro:             scrubRecord.LastFullScrubUnixMicro,
+			LastFullScrubCorruptionErrorCount:  scrubRecord.LastFullScrubCorruptionErrorCount,
+			LastFullScrubReplicationErrorCount: scrubRecord.LastFullScrubReplicationErrorCount,
+			LastFullScrubOtherErrorCount:       scrubRecord.LastFullScrubOtherErrorCount,
+			LastFullScrubDuration:              scrubRecord.LastFullScrubDuration,
 		}
+
 		if opts.Full {
-			scrubRecord.LastFullScrubUnix = scrubRecord.LastScrubUnix
+			scrubRecord.LastFullScrubUnixMicro = scrubRecord.LastScrubUnixMicro
 			scrubRecord.LastFullScrubDuration = scrubRecord.LastScrubDuration
+			scrubRecord.LastFullScrubCorruptionErrorCount = scrubRecord.LastScrubCorruptionErrorCount
+			scrubRecord.LastFullScrubReplicationErrorCount = scrubRecord.LastScrubReplicationErrorCount
+			scrubRecord.LastFullScrubOtherErrorCount = scrubRecord.LastScrubOtherErrorCount
 		}
 
 		SaveScrubRecord(scrubRecord)
 
-		log.Printf("scrubbed %d object(s), %d byte(s) with %d error(s)", scrubbedObjects, scrubbedBytes, scrubRecord.ErrorCount())
+		log.Printf(
+			"scrubbed %d object(s), %d byte(s) with %d corruption errors and %d other error(s) in %s",
+			scrubbedObjects,
+			scrubbedBytes,
+			corruptionErrorCount,
+			scrubRecord.ErrorCount()-corruptionErrorCount,
+			scrubDuration,
+		)
 		atomic.StoreUint64(&_scrubInProgress, 0)
-		atomic.AddUint64(&_scrubsCompleted, 1)
 	}()
 
 	dispatch := make(chan string)
@@ -341,6 +359,7 @@ func ScrubForever() {
 	LoadLastScrubRecord()
 
 	doScrub := false
+	full := false
 
 	scrubTicker := time.NewTicker(ScrubInterval / 2)
 	defer scrubTicker.Stop()
@@ -349,8 +368,8 @@ func ScrubForever() {
 		record := GetLastScrubRecord()
 
 		now := time.Now()
-		lastScrub := time.Unix(record.LastScrubUnix, 0)
-		lastFullScrub := time.Unix(record.LastFullScrubUnix, 0)
+		lastScrub := time.UnixMicro(int64(record.LastScrubUnixMicro))
+		lastFullScrub := time.UnixMicro(int64(record.LastFullScrubUnixMicro))
 
 		// Fix any time jumps.
 		if lastScrub.After(now) || lastFullScrub.After(now) {
@@ -358,22 +377,21 @@ func ScrubForever() {
 			lastFullScrub = now
 		}
 
-		full := false
-
 		if lastScrub.Add(ScrubInterval).Before(now) {
 			doScrub = true
 		}
+
+		if record.LastScrubStartingConfigId != GetClusterConfig().ConfigId {
+			doScrub = true
+		}
+
 		if lastFullScrub.Add(FullScrubInterval).Before(now) {
 			doScrub = true
 			full = true
 		}
-		if atomic.LoadUint64(&_scrubsCompleted) == 0 {
-			// Always do a scrub initially.
-			doScrub = true
-		}
 
 		for doScrub {
-			Scrub(ScrubOpts{Full: full}) // XXX config full and not.
+			Scrub(ScrubOpts{Full: full})
 			full = false
 			if LastScrubHadErrors() {
 				time.Sleep(1 * time.Second)
@@ -386,11 +404,21 @@ func ScrubForever() {
 		case <-scrubTicker.C:
 		case <-_scrubTrigger:
 			doScrub = true
+			if atomic.SwapUint32(&_scrubTriggerForceFull, 0) == 1 {
+				full = true
+			}
 		}
 	}
 }
 
-func TriggerScrub() bool {
+type TriggerScrubOptions struct {
+	FullScrub bool
+}
+
+func TriggerScrub(opts TriggerScrubOptions) bool {
+	if opts.FullScrub {
+		atomic.StoreUint32(&_scrubTriggerForceFull, 1)
+	}
 	select {
 	case _scrubTrigger <- struct{}{}:
 		return true
@@ -400,9 +428,16 @@ func TriggerScrub() bool {
 }
 
 type ScrubRecord struct {
-	LastFullScrubUnix              int64
-	LastScrubUnix                  int64
-	LastFullScrubDuration          time.Duration
+	ScrubsCompleted uint64
+
+	LastScrubStartingConfigId          string
+	LastFullScrubUnixMicro             uint64
+	LastFullScrubDuration              time.Duration
+	LastFullScrubReplicationErrorCount uint64
+	LastFullScrubCorruptionErrorCount  uint64
+	LastFullScrubOtherErrorCount       uint64
+
+	LastScrubUnixMicro             uint64
 	LastScrubDuration              time.Duration
 	LastScrubReplicationErrorCount uint64
 	LastScrubCorruptionErrorCount  uint64
@@ -466,4 +501,20 @@ func LoadLastScrubRecord() {
 	_lastScrubLock.Lock()
 	defer _lastScrubLock.Unlock()
 	_lastScrub = record
+}
+
+func TotalScrubbedObjects() uint64 {
+	return atomic.LoadUint64(&_totalScrubbedObjects)
+}
+
+func TotalScrubCorruptionErrorCount() uint64 {
+	return atomic.LoadUint64(&_totalScrubCorruptionErrorCount)
+}
+
+func TotalScrubReplicationErrorCount() uint64 {
+	return atomic.LoadUint64(&_totalScrubReplicationErrorCount)
+}
+
+func TotalScrubOtherErrorCount() uint64 {
+	return atomic.LoadUint64(&_totalScrubOtherErrorCount)
 }
