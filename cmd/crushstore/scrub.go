@@ -18,6 +18,7 @@ import (
 	"github.com/andrewchambers/crushstore/clusterconfig"
 	"golang.org/x/sync/errgroup"
 	"lukechampine.com/blake3"
+	"github.com/dustin/go-humanize"
 )
 
 var (
@@ -289,12 +290,12 @@ func Scrub(opts ScrubOpts) {
 		SaveScrubRecord(scrubRecord)
 
 		log.Printf(
-			"scrubbed %d object(s), %d byte(s) with %d corruption errors and %d other error(s) in %s",
+			"scrubbed %d object(s), %s with %d corruption errors and %d other error(s) in %s",
 			scrubbedObjects,
-			scrubbedBytes,
+			humanize.IBytes(scrubbedBytes),
 			corruptionErrorCount,
 			scrubRecord.ErrorCount()-corruptionErrorCount,
-			scrubDuration,
+			scrubDuration.Truncate(time.Millisecond),
 		)
 		atomic.StoreUint64(&_scrubInProgress, 0)
 	}()

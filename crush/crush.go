@@ -11,8 +11,6 @@ import (
 	"github.com/xlab/treeprint"
 )
 
-type Comparitor func(Node) bool
-
 type Selector interface {
 	Select(input int64, round int64) Node
 }
@@ -311,7 +309,7 @@ func (h *StorageHierarchy) Crush(input string, selections []CrushSelection) ([]L
 		nextNodes := make([]Node, 0, len(nodes)*sel.Count)
 
 		for _, n := range nodes {
-			selection := h.doSelect(n, hashedInput, sel.Count, nodeType, nil)
+			selection := h.doSelect(n, hashedInput, sel.Count, nodeType)
 			nextNodes = append(nextNodes, selection...)
 		}
 		nodes = nextNodes
@@ -333,7 +331,7 @@ func (h *StorageHierarchy) Crush(input string, selections []CrushSelection) ([]L
 	return locations, nil
 }
 
-func (h *StorageHierarchy) doSelect(parent Node, input int64, count int, nodeTypeIdx int, c Comparitor) []Node {
+func (h *StorageHierarchy) doSelect(parent Node, input int64, count int, nodeTypeIdx int) []Node {
 	var results []Node
 	var rPrime = int64(0)
 	for r := 1; r <= count; r++ {
@@ -345,7 +343,6 @@ func (h *StorageHierarchy) doSelect(parent Node, input int64, count int, nodeTyp
 		for {
 			retryOrigin = false
 			var in = parent
-			var skip = make(map[Node]bool)
 			var retryNode = false
 			for {
 				retryNode = false
@@ -356,7 +353,7 @@ func (h *StorageHierarchy) doSelect(parent Node, input int64, count int, nodeTyp
 					retryNode = true
 				} else {
 					if contains(results, out) {
-						if !nodesAvailable(in, results, skip) {
+						if !nodesAvailable(in, results) {
 							if loopbacks == 150 {
 								escape = true
 								break
@@ -367,22 +364,8 @@ func (h *StorageHierarchy) doSelect(parent Node, input int64, count int, nodeTyp
 							retryNode = true
 						}
 						failure += 1
-
-					} else if c != nil && !c(out) {
-						skip[out] = true
-						if !nodesAvailable(in, results, skip) {
-							if loopbacks == 150 {
-								escape = true
-								break
-							}
-							loopbacks += 1
-							retryOrigin = true
-						} else {
-							retryNode = true
-						}
+					} else if out.IsDefunct() {
 						failure += 1
-					} else if isDefunct(out) {
-						failure++
 						if loopbacks == 150 {
 							escape = true
 							break
@@ -409,16 +392,16 @@ func (h *StorageHierarchy) doSelect(parent Node, input int64, count int, nodeTyp
 	return results
 }
 
-func nodesAvailable(parent Node, selected []Node, rejected map[Node]bool) bool {
-	var children = parent.GetChildren()
+func nodesAvailable(parent Node, selected []Node) bool {
+	children := parent.GetChildren()
 	for _, child := range children {
-		if !isDefunct(child) {
-			if ok := contains(selected, child); !ok {
-				if _, ok := rejected[child]; !ok {
-					return true
-				}
-			}
+		if child.IsDefunct() {
+			continue
 		}
+		if contains(selected, child) {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -428,13 +411,6 @@ func contains(s []Node, n Node) bool {
 		if a == n {
 			return true
 		}
-	}
-	return false
-}
-
-func isDefunct(n Node) bool {
-	if n.IsLeaf() && n.IsDefunct() {
-		return true
 	}
 	return false
 }
