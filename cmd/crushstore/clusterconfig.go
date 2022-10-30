@@ -2,11 +2,15 @@ package main
 
 import (
 	"log"
+	"sync/atomic"
 
 	"github.com/andrewchambers/crushstore/clusterconfig"
 )
 
-var TheConfigWatcher clusterconfig.ConfigWatcher
+var (
+	TheConfigWatcher     clusterconfig.ConfigWatcher
+	_configChangeCounter uint64
+)
 
 func SetConfigWatcher(w clusterconfig.ConfigWatcher) {
 	w.OnConfigChange(func(cfg *clusterconfig.ClusterConfig, err error) {
@@ -18,6 +22,7 @@ func SetConfigWatcher(w clusterconfig.ConfigWatcher) {
 		if !cfg.StorageHierarchy.ContainsStorageNodeAtLocation(ThisLocation) {
 			log.Printf("WARNING - config storage hierarchy does not contain the current node at %s", ThisLocation)
 		}
+		atomic.AddUint64(&_configChangeCounter, 1)
 		TriggerScrub(TriggerScrubOptions{FullScrub: false})
 	})
 	TheConfigWatcher = w

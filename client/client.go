@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -537,29 +538,29 @@ func (c *Client) ListKeys(cb func(RemoteKey) bool, opts ListKeysOptions) error {
 	return nil
 }
 
-type ClusterStatusOptions struct {
-	QueryDefunct bool
-}
-
 type NodeInfo struct {
 	HeapAlloc                          uint64
 	FreeSpace                          uint64
 	UsedSpace                          uint64
 	FreeRAM                            uint64
+	ConfigId                           string
+	Rebalancing                        bool
 	TotalScrubbedObjects               uint64
 	TotalScrubCorruptionErrorCount     uint64
 	TotalScrubReplicationErrorCount    uint64
+	TotalScrubIOErrorCount             uint64
 	TotalScrubOtherErrorCount          uint64
-	LastScrubStartingConfigId          string
 	LastScrubUnixMicro                 uint64
 	LastScrubCorruptionErrorCount      uint64
 	LastScrubReplicationErrorCount     uint64
+	LastScrubIOErrorCount              uint64
 	LastScrubOtherErrorCount           uint64
 	LastFullScrubUnixMicro             uint64
 	LastScrubDuration                  time.Duration
 	LastFullScrubDuration              time.Duration
 	LastFullScrubCorruptionErrorCount  uint64
 	LastFullScrubReplicationErrorCount uint64
+	LastFullScrubIOErrorCount          uint64
 	LastFullScrubOtherErrorCount       uint64
 	LastScrubObjects                   uint64
 }
@@ -587,10 +588,15 @@ func (c *Client) nodeInfo(cfg *clusterconfig.ClusterConfig, server string) (Node
 }
 
 type ClusterStatus struct {
-	Unreachable []string
-	Errors      []error
-	Nodes       []string
-	NodeInfo    map[string]NodeInfo
+	Nodes            []string
+	UnreachableNodes []string
+	DefunctNodes     []string
+	Errors           []error
+	NodeInfo         map[string]NodeInfo
+}
+
+type ClusterStatusOptions struct {
+	QueryDefunct bool
 }
 
 func (c *Client) ClusterStatus(opts ClusterStatusOptions) ClusterStatus {
@@ -601,15 +607,18 @@ func (c *Client) ClusterStatus(opts ClusterStatusOptions) ClusterStatus {
 	}
 
 	for _, node := range cfg.StorageHierarchy.StorageNodes {
-		if node.IsDefunct() && !opts.QueryDefunct {
-			continue
-		}
 		loc := node.Location
 		server := loc[len(loc)-1]
+		if node.IsDefunct() {
+			status.DefunctNodes = append(status.DefunctNodes, server)
+			if !opts.QueryDefunct {
+				continue
+			}
+		}
 		status.Nodes = append(status.Nodes, server)
 		nodeInfo, err := c.nodeInfo(cfg, server)
 		if err != nil {
-			status.Unreachable = append(status.Unreachable, server)
+			status.UnreachableNodes = append(status.UnreachableNodes, server)
 			status.Errors = append(status.Errors, err)
 		} else {
 			status.NodeInfo[server] = nodeInfo
@@ -707,8 +716,14 @@ func (c *Client) ScrubCluster(OnProgress func(ScrubClusterProgress), opts ScrubC
 			corruptionErrors += nodeInfo.TotalScrubCorruptionErrorCount
 			otherErrors += nodeInfo.TotalScrubOtherErrorCount
 		}
+
+		percentComplete := (float64(scrubbedObjects-startScrubbedObjects) / float64(lastScrubTotalObjects)) * 100
+		if math.IsNaN(percentComplete) {
+			percentComplete = 100.0
+		}
+
 		OnProgress(ScrubClusterProgress{
-			ApproximatePercentComplete: (float64(scrubbedObjects-startScrubbedObjects) / float64(lastScrubTotalObjects)) * 100,
+			ApproximatePercentComplete: percentComplete,
 			NodesRemaining:             nodesRemaining,
 			ScrubbedObjects:            scrubbedObjects - startScrubbedObjects,
 			ReplicationErrors:          replicationErrors - startReplicationErrors,

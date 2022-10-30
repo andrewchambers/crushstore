@@ -1037,51 +1037,62 @@ func nodeInfoHandler(w http.ResponseWriter, req *http.Request) {
 	totalSpace := stat.Blocks * uint64(stat.Frsize)
 	freeSpace := stat.Bavail * uint64(stat.Bsize)
 	usedSpace := totalSpace - freeSpace
-
 	freeRAM := memory.FreeMemory()
+
+	// Load the config before checking the config counters below.
+	configId := GetClusterConfig().ConfigId
+	rebalancing := atomic.LoadUint64(&_scrubConfigChangeCounter) != atomic.LoadUint64(&_configChangeCounter)
 
 	buf, err := json.Marshal(&struct {
 		HeapAlloc                          uint64
 		FreeSpace                          uint64
 		UsedSpace                          uint64
+		FreeRAM                            uint64
+		ConfigId                           string
+		Rebalancing                        bool
 		TotalScrubbedObjects               uint64
 		TotalScrubCorruptionErrorCount     uint64
 		TotalScrubReplicationErrorCount    uint64
+		TotalScrubIOErrorCount             uint64
 		TotalScrubOtherErrorCount          uint64
 		LastScrubReplicationErrorCount     uint64
 		LastScrubCorruptionErrorCount      uint64
+		LastScrubIOErrorCount              uint64
 		LastScrubOtherErrorCount           uint64
 		LastScrubUnixMicro                 uint64
 		LastScrubDuration                  time.Duration
-		LastScrubStartingConfigId          string
 		LastFullScrubReplicationErrorCount uint64
 		LastFullScrubCorruptionErrorCount  uint64
+		LastFullScrubIOErrorCount          uint64
 		LastFullScrubOtherErrorCount       uint64
 		LastFullScrubUnixMicro             uint64
 		LastFullScrubDuration              time.Duration
-		FreeRAM                            uint64
 		LastScrubObjects                   uint64
 	}{
+		HeapAlloc:                          m.HeapAlloc,
+		FreeSpace:                          freeSpace,
+		UsedSpace:                          usedSpace,
+		FreeRAM:                            freeRAM,
+		Rebalancing:                        rebalancing,
+		ConfigId:                           configId,
 		TotalScrubbedObjects:               TotalScrubbedObjects(),
 		TotalScrubCorruptionErrorCount:     TotalScrubCorruptionErrorCount(),
 		TotalScrubReplicationErrorCount:    TotalScrubReplicationErrorCount(),
+		TotalScrubIOErrorCount:             TotalScrubIOErrorCount(),
 		TotalScrubOtherErrorCount:          TotalScrubOtherErrorCount(),
-		LastScrubStartingConfigId:          scrubRecord.LastScrubStartingConfigId,
 		LastScrubUnixMicro:                 scrubRecord.LastScrubUnixMicro,
 		LastScrubDuration:                  scrubRecord.LastScrubDuration,
 		LastFullScrubUnixMicro:             scrubRecord.LastFullScrubUnixMicro,
 		LastFullScrubDuration:              scrubRecord.LastFullScrubDuration,
 		LastFullScrubReplicationErrorCount: scrubRecord.LastFullScrubReplicationErrorCount,
 		LastFullScrubCorruptionErrorCount:  scrubRecord.LastFullScrubCorruptionErrorCount,
+		LastFullScrubIOErrorCount:          scrubRecord.LastFullScrubIOErrorCount,
 		LastFullScrubOtherErrorCount:       scrubRecord.LastFullScrubOtherErrorCount,
 		LastScrubReplicationErrorCount:     scrubRecord.LastScrubReplicationErrorCount,
 		LastScrubCorruptionErrorCount:      scrubRecord.LastScrubCorruptionErrorCount,
+		LastScrubIOErrorCount:              scrubRecord.LastScrubIOErrorCount,
 		LastScrubOtherErrorCount:           scrubRecord.LastScrubOtherErrorCount,
 		LastScrubObjects:                   scrubRecord.LastScrubObjects,
-		HeapAlloc:                          m.HeapAlloc,
-		FreeSpace:                          freeSpace,
-		UsedSpace:                          usedSpace,
-		FreeRAM:                            freeRAM,
 	})
 	if err != nil {
 		internalError(w, "error marshalling response: %s", err)
