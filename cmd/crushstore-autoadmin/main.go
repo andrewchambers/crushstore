@@ -1,17 +1,46 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"regexp"
+	"time"
 
 	"github.com/andrewchambers/crushstore/cli"
 	"github.com/andrewchambers/crushstore/client"
 	"github.com/google/shlex"
 	"gopkg.in/yaml.v3"
 )
+
+func replaceFile(path string, contents []byte) error {
+	var mode fs.FileMode
+	stat, err := os.Stat(path)
+	if err == nil {
+		mode = stat.Mode()
+	} else if os.IsNotExist(err) {
+		mode = 0644
+	} else {
+		return err
+	}
+	tmpPath := path + ".tmp"
+	err = os.WriteFile(tmpPath, contents, mode)
+	if err != nil {
+		return err
+	}
+	err = os.Rename(tmpPath, path)
+	if err != nil {
+		return err
+	}
+	return err
+}
+
+type AutoadminState struct {
+	UnreachableSince map[string]time.Time
+}
 
 func patchConfig(configBytes []byte, defunct map[string]struct{}, weights map[string]uint64) ([]byte, error) {
 	var rawConfig yaml.Node
@@ -51,7 +80,10 @@ func patchConfig(configBytes []byte, defunct map[string]struct{}, weights map[st
 }
 
 type UpdateClusterConfigOptions struct {
-	UpdateWeights bool
+	StateFile          string
+	UpdateWeights      bool
+	DryRun             bool
+	UnreachableTimeout time.Duration
 }
 
 func UpdateClusterConfig(configPath string, opts UpdateClusterConfigOptions) error {
@@ -62,12 +94,30 @@ func UpdateClusterConfig(configPath string, opts UpdateClusterConfigOptions) err
 	}
 	defer c.Close()
 
+	var state AutoadminState
+
+	if opts.StateFile != "" {
+		stateBytes, err := os.ReadFile(opts.StateFile)
+		if err == nil {
+			err = json.Unmarshal(stateBytes, &state)
+			if err != nil {
+				return fmt.Errorf("unable to load state file %q: %w", opts.StateFile, err)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("unable to read state file %q: %w", opts.StateFile, err)
+		}
+	}
+
+	if state.UnreachableSince == nil {
+		state.UnreachableSince = make(map[string]time.Time)
+	}
+
 	clusterConfig := c.GetClusterConfig()
 	clusterStatus := c.ClusterStatus(client.ClusterStatusOptions{
 		QueryDefunct: true,
 	})
 
-	if len(clusterStatus.UnreachableNodes) >= len(clusterStatus.Nodes)/2 {
+	if len(clusterStatus.UnreachableNodes) >= len(clusterStatus.Nodes)/2+len(clusterStatus.Nodes)%2 {
 		return fmt.Errorf(
 			"refusing to update config when less than half the cluster is reachable (%d/%d)",
 			len(clusterStatus.Nodes)-len(clusterStatus.UnreachableNodes), len(clusterStatus.Nodes),
@@ -80,10 +130,20 @@ func UpdateClusterConfig(configPath string, opts UpdateClusterConfigOptions) err
 	for _, node := range clusterStatus.Nodes {
 		nodeInfo, ok := clusterStatus.NodeInfo[node]
 		if !ok {
-			defunct[node] = struct{}{}
-			log.Printf("%q is now defunct because it is unreachable", node)
+			log.Printf("%q is unreachable", node)
+			since, ok := state.UnreachableSince[node]
+			if ok {
+				if time.Now().Sub(since) > opts.UnreachableTimeout {
+					log.Printf("%q is defunct because it is has been unreachable longer than %s", node, opts.UnreachableTimeout)
+					defunct[node] = struct{}{}
+				}
+			} else {
+				state.UnreachableSince[node] = time.Now()
+			}
 			continue
 		}
+
+		delete(state.UnreachableSince, node)
 
 		if opts.UpdateWeights {
 			GiBTotal := (nodeInfo.FreeSpace + nodeInfo.UsedSpace) / (1024 * 1024 * 1024)
@@ -124,7 +184,18 @@ func UpdateClusterConfig(configPath string, opts UpdateClusterConfigOptions) err
 	for _, previouslyDefunct := range clusterStatus.DefunctNodes {
 		_, isDefunct := defunct[previouslyDefunct]
 		if !isDefunct {
-			log.Printf("%q is now healthy")
+			log.Printf("%q is now healthy", previouslyDefunct)
+		}
+	}
+
+	if opts.StateFile != "" && !opts.DryRun {
+		stateBytes, err := json.Marshal(state)
+		if err != nil {
+			return err
+		}
+		err = replaceFile(opts.StateFile, stateBytes)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -133,20 +204,34 @@ func UpdateClusterConfig(configPath string, opts UpdateClusterConfigOptions) err
 		return err
 	}
 
-	log.Printf("\n%s", string(newConfigBytes))
+	if !opts.DryRun {
+		log.Printf("updating %q", configPath)
+		err = replaceFile(configPath, newConfigBytes)
+		if err != nil {
+			return err
+		}
+	} else {
+		log.Printf("would update %q to contain:\n%s", configPath, string(newConfigBytes))
+	}
 
 	return nil
 }
 
 func main() {
 	cli.RegisterDefaultFlags()
+	dryRun := flag.Bool("dry-run", false, "Do a try run without changing any config.")
+	stateFile := flag.String("state", "", "Store state in this file (enables more sophisticated checks).")
 	updateWeights := flag.Bool("update-weights", false, "Update the cluster config weights based on disk usage.")
+	unreachableTimeout := flag.Duration("unreachable-timeout", 60*time.Minute, "If a node has been unreachable for this long, mark it as defunct (requires -state).")
 	flag.Parse()
 	err := UpdateClusterConfig(cli.ClusterConfigFile, UpdateClusterConfigOptions{
-		UpdateWeights: *updateWeights,
+		DryRun:             *dryRun,
+		StateFile:          *stateFile,
+		UpdateWeights:      *updateWeights,
+		UnreachableTimeout: *unreachableTimeout,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "unable to update config: %s", err)
+		fmt.Fprintf(os.Stderr, "unable to update config: %s\n", err)
 		os.Exit(1)
 	}
 }
