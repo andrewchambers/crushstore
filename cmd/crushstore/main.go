@@ -10,6 +10,7 @@ import (
 	"github.com/andrewchambers/crushstore/clusterconfig"
 	"github.com/andrewchambers/crushstore/crush"
 	"github.com/google/shlex"
+	"golang.org/x/sys/unix"
 )
 
 var ThisLocation crush.Location
@@ -50,6 +51,17 @@ func main() {
 	}
 
 	ThisLocation = crush.Location(parsedLocation)
+
+	rLimit := unix.Rlimit{}
+	err = unix.Getrlimit(unix.RLIMIT_NOFILE, &rLimit)
+	if err != nil {
+		log.Fatalf("error getting open file rlimit: %s", err)
+	}
+	rLimit.Cur = rLimit.Max
+	err = unix.Setrlimit(unix.RLIMIT_NOFILE, &rLimit)
+	if err != nil {
+		fmt.Println("error setting open file rlimit", err)
+	}
 
 	if *dataDir == "" {
 		log.Fatalf("-data-dir not specified.")
