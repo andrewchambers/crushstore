@@ -346,7 +346,9 @@ rebalanceAgain:
 		}
 		if !ok || header.After(&existingHeader) {
 			log.Printf("restoring %q to primary server %s", k, primaryServer)
-			err := ReplicateObj(clusterConfig, primaryServer, k, objF, ReplicateOptions{Fanout: true})
+			err := ReplicateObj(clusterConfig, primaryServer, k, objF, ReplicateOptions{
+				Fanout: true, // We want the primary server to immediately fan it out.
+			})
 			if err != nil {
 				if err == ErrMisdirectedRequest {
 					goto rebalanceAgain
@@ -356,7 +358,7 @@ rebalanceAgain:
 			}
 		}
 
-		// XXX: race condition.
+		// N.B.: race condition.
 		// Imagine there are just two servers with two object replicas:
 		//
 		// 1. Config is updated to single replica.
@@ -367,8 +369,14 @@ rebalanceAgain:
 		// 6. The other server checks this server and finds the object.
 		// 7. Both servers delete the object.
 		//
-		// This race condition seems like it would be extremely unlikely,
-		// but we should verify this or find a suitable fix.
+		// Because servers check the configs agree in replicate and check messages, this
+		// seems extremely unlikely, if not impossible and in the future would love some formal proof
+		// this is impossible using something like TLA+.
+		//
+		// To be extra safe, we do not automated rapid cycling of the config in the auto-admin.
+		// It also seems unlikely human administrators would do this themselves - but we should
+		// document that rapidly cycling the configuration before rebalancing is complete is a bad idea
+		// and in what cases it may be unsafe.
 
 		keepObject := false
 		for i := 0; i < len(locs); i++ {

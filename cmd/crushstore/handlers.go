@@ -378,6 +378,9 @@ func readObjectForm(req *http.Request, opts readObjectFormOptions) (*objectForm,
 				headerBytes := [OBJECT_HEADER_SIZE]byte{}
 				_, err := io.ReadFull(p, headerBytes[:])
 				if err != nil {
+					if err == io.ErrUnexpectedEOF {
+						return nil, false, nil
+					}
 					return nil, false, err
 				}
 
@@ -462,8 +465,8 @@ func putHandler(w http.ResponseWriter, req *http.Request) {
 
 	// Do the fanout on the temporary object so the scrubber doesn't interfere.
 	err = fanoutObject(k, header, tmpF.Name(), fanoutOpts{
-		Replicas: nReplicas,
-		DoCheck:  false,
+		Replicas:   nReplicas,
+		CheckFirst: false,
 	})
 	if err != nil {
 		internalError(w, "unable to fanout %q: %s", k, err)
@@ -547,7 +550,7 @@ func deleteHandler(w http.ResponseWriter, req *http.Request) {
 
 	// Do the fanout on the temporary object so the scrubber doesn't interfere.
 	err = fanoutObject(k, objHeader, tmpF.Name(), fanoutOpts{
-		DoCheck: false,
+		CheckFirst: false,
 	})
 	if err != nil {
 		internalError(w, "unable to fanout %q: %s", k, err)
@@ -724,7 +727,7 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 		// Do the fanout on the temporary object so the scrubber doesn't interfere.
 		err = fanoutObject(k, header, tmpF.Name(),
 			fanoutOpts{
-				DoCheck: true,
+				CheckFirst: true,
 			})
 		if err != nil {
 			internalError(w, "unable to fanout %q: %s", k, err)
@@ -759,8 +762,8 @@ func replicateHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 type fanoutOpts struct {
-	DoCheck  bool
-	Replicas int
+	CheckFirst bool
+	Replicas   int
 }
 
 func fanoutObject(k string, header ObjHeader, objPath string, opts fanoutOpts) error {
@@ -800,7 +803,7 @@ func fanoutObject(k string, header ObjHeader, objPath string, opts fanoutOpts) e
 				defer wg.Done()
 				server := loc[len(loc)-1]
 
-				if opts.DoCheck {
+				if opts.CheckFirst {
 					existingHeader, ok, err := CheckObj(clusterConfig, server, k)
 					if err != nil {
 						log.Printf("error checking %q on %s: %s", k, server, err)
@@ -809,7 +812,7 @@ func fanoutObject(k string, header ObjHeader, objPath string, opts fanoutOpts) e
 						}
 						return
 					}
-					if ok && !header.After(&existingHeader) {
+					if ok && existingHeader.After(&header) {
 						atomic.AddUint64(&successfulReplications, 1)
 						return
 					}
@@ -822,7 +825,9 @@ func fanoutObject(k string, header ObjHeader, objPath string, opts fanoutOpts) e
 				}
 				defer objF.Close()
 				log.Printf("replicating %q to %s", k, server)
-				err = ReplicateObj(clusterConfig, server, k, objF, ReplicateOptions{})
+				err = ReplicateObj(clusterConfig, server, k, objF, ReplicateOptions{
+					Fanout: false,
+				})
 				if err != nil {
 					log.Printf("error replicating %q to %s: %s", k, server, err)
 					if err == ErrMisdirectedRequest {

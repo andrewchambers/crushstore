@@ -191,6 +191,11 @@ type PutOptions struct {
 }
 
 func (c *Client) Put(k string, data io.ReadSeeker, opts PutOptions) error {
+
+	// XXX One idea is to add an option to create a header in the client and
+	// replicate directly to the right nodes - this avoids the crush lookup/hop
+	// on the remote side needed for cluster fanout.
+
 	cfg := c.GetClusterConfig()
 	locs, err := cfg.Crush(k)
 	if err != nil {

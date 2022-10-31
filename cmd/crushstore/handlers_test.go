@@ -447,10 +447,17 @@ func TestReplicateRejectsCorrupt(t *testing.T) {
 func TestReplicateRejectsOutOfDateConfig(t *testing.T) {
 	PrepareForTest(t)
 
+	objHeader := ObjHeader{
+		Size:               0,
+		CreatedAtUnixMicro: 3,
+		B3sum:              blake3.Sum256([]byte{}),
+	}
+	objHeaderBytes := objHeader.ToBytes()
+
 	k := RandomKeyOther(t)
 
 	rr := httptest.NewRecorder()
-	req := mockReplicateRequest(t, "cid=1234&key="+k, []byte{})
+	req := mockReplicateRequest(t, "cid=1234&key="+k, objHeaderBytes[:])
 	replicateHandler(rr, req)
 	if rr.Code != http.StatusMisdirectedRequest {
 		body, _ := io.ReadAll(rr.Body)
