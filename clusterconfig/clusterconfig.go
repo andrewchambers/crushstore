@@ -21,7 +21,7 @@ type ClusterConfig struct {
 	ConfigId         string
 	ConfigBytes      []byte
 	ClusterSecret    string
-	PlacementRules   []crush.CrushSelection
+	PlacementRules   []crush.PlacementRule
 	StorageHierarchy *crush.StorageHierarchy
 }
 
@@ -68,7 +68,7 @@ func ParseClusterConfig(configYamlBytes []byte) (*ClusterConfig, error) {
 			return nil, fmt.Errorf("storage node needs at least 3 components")
 		}
 
-		weight, err := strconv.ParseInt(parts[0], 10, 64)
+		weight, err := strconv.ParseUint(parts[0], 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing weight %q: %w", parts[0], err)
 		}
@@ -90,31 +90,30 @@ func ParseClusterConfig(configYamlBytes []byte) (*ClusterConfig, error) {
 		}, nil
 	}
 
-	// TODO rename CrushSelection to PlacementRule
-	parsePlacementRule := func(s string) (crush.CrushSelection, error) {
+	parsePlacementRule := func(s string) (crush.PlacementRule, error) {
 		parts, err := shlex.Split(s)
 		if err != nil {
-			return crush.CrushSelection{}, fmt.Errorf("unable to split placement rule %q into components: %w", s, err)
+			return nil, fmt.Errorf("unable to split placement rule %q into components: %w", s, err)
 		}
 		if len(parts) < 1 {
-			return crush.CrushSelection{}, fmt.Errorf("unexpected empty placement rule")
+			return nil, fmt.Errorf("unexpected empty placement rule")
 		}
 		switch parts[0] {
 		case "select":
 			if len(parts) != 3 {
-				return crush.CrushSelection{}, fmt.Errorf("select placement rules require 2 arguments")
+				return nil, fmt.Errorf("select placement rules require 2 arguments")
 			}
 			typeName := parts[1]
-			count, err := strconv.Atoi(parts[2])
+			count, err := strconv.ParseUint(parts[2], 10, 64)
 			if err != nil {
-				return crush.CrushSelection{}, fmt.Errorf("unable to parse select count %q: %w", parts[2], err)
+				return nil, fmt.Errorf("unable to parse select count %q: %w", parts[2], err)
 			}
-			return crush.CrushSelection{
+			return crush.CrushSelectPlacement{
 				Type:  typeName,
 				Count: count,
 			}, nil
 		default:
-			return crush.CrushSelection{}, fmt.Errorf("unexpected placement operator %q", parts[0])
+			return nil, fmt.Errorf("unexpected placement operator %q", parts[0])
 		}
 	}
 
@@ -136,7 +135,11 @@ func ParseClusterConfig(configYamlBytes []byte) (*ClusterConfig, error) {
 			return nil, fmt.Errorf("unable add %q to storage hierarchy: %w", storageNodeString, err)
 		}
 	}
-	newConfig.StorageHierarchy.Finish()
+
+	err = newConfig.StorageHierarchy.Finish()
+	if err != nil {
+		return nil, err
+	}
 
 	return newConfig, nil
 }

@@ -370,7 +370,7 @@ rebalanceAgain:
 		// 7. Both servers delete the object.
 		//
 		// Because servers check the configs agree in replicate and check messages, this
-		// seems extremely unlikely, if not impossible and in the future would love some formal proof
+		// seems extremely unlikely - if not impossible. In the future would love some formal proof
 		// this is impossible using something like TLA+.
 		//
 		// To be extra safe, we do not automated rapid cycling of the config in the auto-admin.
@@ -488,6 +488,9 @@ func Scrub(opts ScrubOpts) {
 
 	objectCount := uint64(0)
 	err := filepath.WalkDir(filepath.Join(ObjectDir, "obj"), func(path string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 		if e.IsDir() {
 			return nil
 		}

@@ -28,7 +28,8 @@ var (
 )
 
 const (
-	OBJECT_DIR_SHARDS  = 256
+	OBJECT_DIR_SHARDS  = 1024
+	OBJECT_SHARD_FMT   = "%03x"
 	OBJECT_HEADER_SIZE = 52
 )
 
@@ -130,7 +131,7 @@ type ObjectIter struct {
 }
 
 func IterateObjects() (*ObjectIter, error) {
-	d, err := os.Open(fmt.Sprintf("%s/obj/00", ObjectDir))
+	d, err := os.Open(fmt.Sprintf("%s/obj/"+OBJECT_SHARD_FMT, ObjectDir, 0))
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +162,7 @@ func (it *ObjectIter) Next() (ObjectIterEntry, bool, error) {
 					continue
 				}
 				_ = it.currentDir.Close()
-				d, err := os.Open(fmt.Sprintf("%s/obj/%02x", ObjectDir, it.currentDirIdx))
+				d, err := os.Open(fmt.Sprintf("%s/obj/"+OBJECT_SHARD_FMT, ObjectDir, it.currentDirIdx))
 				if err != nil {
 					return ObjectIterEntry{}, false, err
 				}
@@ -175,7 +176,7 @@ func (it *ObjectIter) Next() (ObjectIterEntry, bool, error) {
 			if strings.HasSuffix(ent.Name(), "$tmp") {
 				continue
 			}
-			objf, err := os.Open(fmt.Sprintf("%s/obj/%02x/%s", ObjectDir, it.currentDirIdx, ent.Name()))
+			objf, err := os.Open(fmt.Sprintf("%s/obj/"+OBJECT_SHARD_FMT+"/%s", ObjectDir, it.currentDirIdx, ent.Name()))
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					continue
@@ -218,7 +219,7 @@ type KeyIter struct {
 }
 
 func IterateKeys() (*KeyIter, error) {
-	d, err := os.Open(fmt.Sprintf("%s/obj/00", ObjectDir))
+	d, err := os.Open(fmt.Sprintf("%s/obj/"+OBJECT_SHARD_FMT, ObjectDir, 0))
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +248,7 @@ func (it *KeyIter) Next() (string, bool, error) {
 					continue
 				}
 				_ = it.currentDir.Close()
-				d, err := os.Open(fmt.Sprintf("%s/obj/%02x", ObjectDir, it.currentDirIdx))
+				d, err := os.Open(fmt.Sprintf("%s/obj/"+OBJECT_SHARD_FMT, ObjectDir, it.currentDirIdx))
 				if err != nil {
 					return "", false, err
 				}
@@ -276,12 +277,12 @@ func (it *KeyIter) Close() error {
 
 func ObjectPathFromKey(k string) string {
 	h := xxhash.Sum64String(k) % OBJECT_DIR_SHARDS
-	return fmt.Sprintf("%s/obj/%02x/%s", ObjectDir, h, url.QueryEscape(k))
+	return fmt.Sprintf("%s/obj/"+OBJECT_SHARD_FMT+"/%s", ObjectDir, h, url.QueryEscape(k))
 }
 
 func ObjectDirHandleAndPathFromKey(k string) (*os.File, string) {
 	h := xxhash.Sum64String(k) % OBJECT_DIR_SHARDS
-	objPath := fmt.Sprintf("%s/obj/%02x/%s", ObjectDir, h, url.QueryEscape(k))
+	objPath := fmt.Sprintf("%s/obj/"+OBJECT_SHARD_FMT+"/%s", ObjectDir, h, url.QueryEscape(k))
 	d := _ObjectDirShardHandles[h]
 	return d, objPath
 }
@@ -339,7 +340,7 @@ func OpenObjectDir(location crush.Location, dir string) error {
 	}
 
 	for i := 0; i < OBJECT_DIR_SHARDS; i++ {
-		p := filepath.Join(dir, fmt.Sprintf("obj/%02x", i))
+		p := filepath.Join(dir, fmt.Sprintf("obj/"+OBJECT_SHARD_FMT, i))
 		_, err := os.Stat(p)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {

@@ -16,4 +16,5 @@ require (
 	github.com/dustin/go-humanize v1.0.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
+	lukechampine.com/uint128 v1.2.0 // indirect
 )

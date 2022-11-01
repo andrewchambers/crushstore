@@ -11,19 +11,15 @@ import (
 	"github.com/xlab/treeprint"
 )
 
-type Selector interface {
-	Select(input int64, round int64) Node
-}
-
 type Node interface {
 	GetId() string
 	GetTypeIdx() int
 	GetChildren() []Node
-	GetWeight() int64
+	GetWeight() uint64
 	IsDefunct() bool
 	GetParent() Node
 	IsLeaf() bool
-	Select(input int64, round int64) Node
+	Select(input uint64, round uint64) Node
 }
 
 type Location []string
@@ -49,7 +45,7 @@ func (l Location) String() string {
 type StorageNodeInfo struct {
 	Location Location
 	Defunct  bool
-	Weight   int64
+	Weight   uint64
 }
 
 type StorageNode struct {
@@ -67,7 +63,7 @@ func (n *StorageNode) IsDefunct() bool {
 	return n.Defunct
 }
 
-func (n *StorageNode) GetWeight() int64 {
+func (n *StorageNode) GetWeight() uint64 {
 	return n.Weight
 }
 
@@ -87,7 +83,7 @@ func (n *StorageNode) IsLeaf() bool {
 	return true
 }
 
-func (n *StorageNode) Select(input int64, round int64) Node {
+func (n *StorageNode) Select(input uint64, round uint64) Node {
 	return nil
 }
 
@@ -100,7 +96,7 @@ type InternalNode struct {
 	NameToChild map[string]Node
 	Defunct     bool
 	UsedSpace   int64
-	Weight      int64
+	Weight      uint64
 	Selector    Selector
 }
 
@@ -112,7 +108,7 @@ func (n *InternalNode) IsDefunct() bool {
 	return n.Defunct
 }
 
-func (n *InternalNode) GetWeight() int64 {
+func (n *InternalNode) GetWeight() uint64 {
 	return n.Weight
 }
 
@@ -132,7 +128,7 @@ func (n *InternalNode) IsLeaf() bool {
 	return len(n.Children) == 0
 }
 
-func (n *InternalNode) Select(input int64, round int64) Node {
+func (n *InternalNode) Select(input uint64, round uint64) Node {
 	return n.Selector.Select(input, round)
 }
 
@@ -216,7 +212,7 @@ func (h *StorageHierarchy) AddStorageNode(ni *StorageNodeInfo) error {
 			panic(err)
 		}
 		if i != 0 {
-			_, err := idBuf.WriteString(" ")
+			_, err := idBuf.WriteString("\x00")
 			if err != nil {
 				panic(err)
 			}
@@ -249,7 +245,12 @@ func (h *StorageHierarchy) AddStorageNode(ni *StorageNodeInfo) error {
 	return nil
 }
 
-func (h *StorageHierarchy) Finish() {
+func (h *StorageHierarchy) Finish() error {
+
+	if len(h.StorageNodes) == 0 {
+		return fmt.Errorf("expected at least one storage node")
+	}
+
 	var recurse func(n *InternalNode)
 	recurse = func(n *InternalNode) {
 		n.ChildNames = make([]string, 0, len(n.NameToChild))
@@ -277,42 +278,49 @@ func (h *StorageHierarchy) Finish() {
 				}
 			}
 		}
-
-		n.Selector = NewStrawSelector(n.Children)
+		n.Selector = NewRendezvousHashSelector(n.Children)
 	}
 	recurse(h.Root)
+
+	return nil
 }
 
-type CrushSelection struct {
+type CrushSelectPlacement struct {
 	Type  string
-	Count int
+	Count uint64
 }
 
-func (h *StorageHierarchy) Crush(input string, selections []CrushSelection) ([]Location, error) {
+type PlacementRule interface{}
 
-	if len(selections) == 0 {
-		return nil, errors.New("expected at least one selection rule")
+func (h *StorageHierarchy) Crush(input string, rules []PlacementRule) ([]Location, error) {
+
+	if len(rules) == 0 {
+		return nil, errors.New("expected at least one placement rule")
 	}
 
-	expectedCount := 1
-
+	expectedCount := uint64(1)
+	selection := []Node{}
 	nodes := []Node{h.Root}
-	hashedInput := int64(xxhash.Sum64String(input))
+	hashedInput := xxhash.Sum64String(input)
 
-	for _, sel := range selections {
-		nodeType, ok := h.TypeToIdx[sel.Type]
-		if !ok {
-			return nil, fmt.Errorf("unable to do CRUSH mapping, unknown type '%s'", sel.Type)
+	for _, rule := range rules {
+		switch rule := rule.(type) {
+		case CrushSelectPlacement:
+			nodeType, ok := h.TypeToIdx[rule.Type]
+			if !ok {
+				return nil, fmt.Errorf("unable to do CRUSH mapping, unknown type '%s'", rule.Type)
+			}
+			expectedCount *= rule.Count
+			nextNodes := make([]Node, 0, uint64(len(nodes))*rule.Count)
+			for _, n := range nodes {
+				selection = h.doSelect(n, hashedInput, uint64(rule.Count), nodeType, selection[:0])
+				nextNodes = append(nextNodes, selection...)
+			}
+			nodes = nextNodes
+		default:
+			panic("bug")
 		}
 
-		expectedCount *= sel.Count
-		nextNodes := make([]Node, 0, len(nodes)*sel.Count)
-
-		for _, n := range nodes {
-			selection := h.doSelect(n, hashedInput, sel.Count, nodeType)
-			nextNodes = append(nextNodes, selection...)
-		}
-		nodes = nextNodes
 	}
 
 	locations := make([]Location, 0, len(nodes))
@@ -324,29 +332,28 @@ func (h *StorageHierarchy) Crush(input string, selections []CrushSelection) ([]L
 		locations = append(locations, storageNode.Location)
 	}
 
-	if len(locations) != expectedCount {
+	if uint64(len(locations)) != expectedCount {
 		return locations, errors.New("unable to satisfy crush placement")
 	}
 
 	return locations, nil
 }
 
-func (h *StorageHierarchy) doSelect(parent Node, input int64, count int, nodeTypeIdx int) []Node {
-	var results []Node
-	var rPrime = int64(0)
-	for r := 1; r <= count; r++ {
-		var failure = 0
-		var loopbacks = 0
-		var escape = false
-		var retryOrigin = false
+func (h *StorageHierarchy) doSelect(parent Node, input uint64, count uint64, nodeTypeIdx int, results []Node) []Node {
+	rPrime := uint64(0)
+	for r := uint64(1); r <= count; r++ {
+		failure := uint64(0)
+		loopbacks := uint64(0)
+		escape := false
+		retryOrigin := false
 		var out Node
 		for {
 			retryOrigin = false
-			var in = parent
-			var retryNode = false
+			in := parent
+			retryNode := false
 			for {
 				retryNode = false
-				rPrime = int64(r + failure)
+				rPrime = r + failure
 				out = in.Select(input, rPrime)
 				if out.GetTypeIdx() != nodeTypeIdx {
 					in = out
@@ -389,6 +396,7 @@ func (h *StorageHierarchy) doSelect(parent Node, input int64, count int, nodeTyp
 		}
 		results = append(results, out)
 	}
+
 	return results
 }
 
